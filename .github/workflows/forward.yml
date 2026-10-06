@@ -3,9 +3,8 @@ name: Telegram Forwarder
 on:
   workflow_dispatch:
 
-  schedule:
-    - cron: "*/15 * * * *"
-
+ schedule:
+  - cron: "7,22,37,52 * * * *"
 jobs:
 
   forward:
