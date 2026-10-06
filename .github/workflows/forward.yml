@@ -5,9 +5,12 @@ on:
   # GitHub Actions 页面手动运行
   workflow_dispatch:
 
-  # 每 60 分钟运行一次
+  # 每天北京时间 16:00、18:00 运行
+  # GitHub Actions 使用 UTC：
+  # 08:00 UTC = 北京时间 16:00
+  # 10:00 UTC = 北京时间 18:00
   schedule:
-    - cron: "7,22,37,52 * * * *"
+    - cron: "0 8,10 * * *"
 
 
 # 允许 Actions 提交 processed.json
@@ -104,7 +107,7 @@ jobs:
           TARGET_CHANNEL: ${{ secrets.TARGET_CHANNEL }}
 
           # 每个源频道最多读取最近 100 条
-          SCAN_LIMIT: "100"
+          SCAN_LIMIT: "500"
 
         run: |
 
