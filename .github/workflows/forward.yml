@@ -9,6 +9,11 @@ on:
     - cron: "7,22,37,52 * * * *"
 
 
+permissions:
+
+  contents: write
+
+
 jobs:
 
   forward:
@@ -17,27 +22,51 @@ jobs:
 
     steps:
 
-      - name: Checkout
+      # ==========================================
+      # 1. 获取最新代码和 processed.json
+      # ==========================================
+
+      - name: Checkout repository
+
         uses: actions/checkout@v4
 
+        with:
+          fetch-depth: 0
+
+
+      # ==========================================
+      # 2. 安装 Python
+      # ==========================================
 
       - name: Setup Python
+
         uses: actions/setup-python@v5
 
         with:
           python-version: "3.11"
 
 
+      # ==========================================
+      # 3. 安装 Tesseract
+      # ==========================================
+
       - name: Install Tesseract
+
         run: |
 
           sudo apt-get update
 
           sudo apt-get install -y \
-            tesseract-ocr
+            tesseract-ocr \
+            tesseract-ocr-eng
 
+
+      # ==========================================
+      # 4. 安装 Python 依赖
+      # ==========================================
 
       - name: Install Python packages
+
         run: |
 
           python -m pip install \
@@ -47,14 +76,17 @@ jobs:
             -r requirements.txt
 
 
+      # ==========================================
+      # 5. 运行 Telegram 转发程序
+      # ==========================================
+
       - name: Run Telegram Forwarder
+
         env:
 
           API_ID: ${{ secrets.API_ID }}
 
           API_HASH: ${{ secrets.API_HASH }}
-
-          PHONE: ${{ secrets.PHONE }}
 
           TELEGRAM_SESSION: ${{ secrets.TELEGRAM_SESSION }}
 
@@ -65,3 +97,36 @@ jobs:
         run: |
 
           python main.py
+
+
+      # ==========================================
+      # 6. 保存 processed.json
+      # ==========================================
+
+      - name: Save processed messages
+
+        run: |
+
+          git config \
+            user.name "github-actions[bot]"
+
+          git config \
+            user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+
+          git add processed.json
+
+
+          if git diff --cached --quiet; then
+
+            echo "No changes to processed.json"
+
+          else
+
+            git commit \
+              -m "Update processed messages"
+
+            git push
+
+          fi
