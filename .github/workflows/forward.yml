@@ -3,10 +3,10 @@ name: Telegram Forwarder
 on:
   workflow_dispatch:
 
- schedule:
-  - cron: "7,22,37,52 * * * *"
-jobs:
+  schedule:
+    - cron: "7,22,37,52 * * * *"
 
+jobs:
   forward:
 
     runs-on: ubuntu-latest
@@ -30,11 +30,11 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Run forwarder
+      - name: Run Telegram Forwarder
         env:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
-          PHONE: ${{ secrets.PHONE }}
+          TELEGRAM_SESSION: ${{ secrets.TELEGRAM_SESSION }}
           SOURCE_CHANNELS: ${{ secrets.SOURCE_CHANNELS }}
           TARGET_CHANNEL: ${{ secrets.TARGET_CHANNEL }}
         run: |
