@@ -1,107 +1,145 @@
 import os
 import re
-import asyncio
+import json
 import tempfile
-import shutil
+import asyncio
 from datetime import datetime, timezone
 
-from PIL import Image, ImageOps
+from PIL import Image
 import pytesseract
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
-from telethon.tl.types import MessageMediaPhoto
 
 
-# ============================================================
-# 1. 读取 GitHub Secrets
-# ============================================================
+# =========================================================
+# 环境变量
+# =========================================================
 
 API_ID = int(os.environ["API_ID"])
+
 API_HASH = os.environ["API_HASH"]
+
 TELEGRAM_SESSION = os.environ["TELEGRAM_SESSION"]
 
 SOURCE_CHANNELS = [
     x.strip()
-    for x in os.environ.get("SOURCE_CHANNELS", "").split(",")
+    for x in os.environ.get(
+        "SOURCE_CHANNELS",
+        ""
+    ).split(",")
     if x.strip()
 ]
 
 TARGET_CHANNEL = os.environ["TARGET_CHANNEL"]
 
 
-# ============================================================
-# 2. Telegram Client
-#
-# 使用 StringSession
-# 不需要每次输入验证码
-# ============================================================
+# =========================================================
+# 已处理消息
+# =========================================================
 
-client = TelegramClient(
-    StringSession(TELEGRAM_SESSION),
-    API_ID,
-    API_HASH
-)
+PROCESSED_FILE = "processed.json"
 
 
-# ============================================================
-# 3. 联系方式检测规则
-# ============================================================
+def load_processed():
 
-# 电话号码
+    if not os.path.exists(PROCESSED_FILE):
+        return {}
+
+    try:
+
+        with open(
+            PROCESSED_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
+            return json.load(f)
+
+    except Exception:
+
+        return {}
+
+
+def save_processed(data):
+
+    with open(
+        PROCESSED_FILE,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        json.dump(
+            data,
+            f,
+            ensure_ascii=False,
+            indent=2
+        )
+
+
+processed = load_processed()
+
+
+# =========================================================
+# 联系方式检测
+# =========================================================
+
 PHONE_PATTERN = re.compile(
     r"(?<!\d)"
-    r"(?:\+?\d[\d\s\-.()]{7,}\d)"
+    r"(?:\+?\d[\d\s\-().]{7,}\d)"
     r"(?!\d)",
-    re.IGNORECASE
+    re.I
 )
 
-# Telegram / t.me
+
 TELEGRAM_LINK_PATTERN = re.compile(
-    r"(?:https?://)?(?:www\.)?"
+    r"(?:https?://)?"
     r"(?:t\.me|telegram\.me)/"
-    r"[A-Za-z0-9_+/-]+",
-    re.IGNORECASE
+    r"[A-Za-z0-9_]+",
+    re.I
 )
 
-# @用户名
-USERNAME_PATTERN = re.compile(
+
+TELEGRAM_USERNAME_PATTERN = re.compile(
     r"@[A-Za-z0-9_]{4,}",
-    re.IGNORECASE
+    re.I
 )
 
-# WhatsApp
+
 WHATSAPP_PATTERN = re.compile(
-    r"\b(?:whatsapp|wa\.me)\b",
-    re.IGNORECASE
+    r"(?:whatsapp|wa\.me)",
+    re.I
 )
 
-# 微信
+
 WECHAT_PATTERN = re.compile(
-    r"\b(?:wechat|weixin)\b|微信",
-    re.IGNORECASE
-)
-
-# LINE
-LINE_PATTERN = re.compile(
-    r"\b(?:line|line\.me)\b",
-    re.IGNORECASE
-)
-
-# 联系方式相关词
-CONTACT_KEYWORDS_PATTERN = re.compile(
-    r"(telegram|whatsapp|wechat|weixin|微信|"
-    r"客服|联系|加我|私聊|扫码|二维码|"
-    r"contact|customer\s*service)",
-    re.IGNORECASE
+    r"(?:wechat|weixin|微信|微信号)",
+    re.I
 )
 
 
-# ============================================================
-# 4. 判断文字是否包含联系方式
-# ============================================================
+CONTACT_KEYWORD_PATTERN = re.compile(
+    r"(?:"
+    r"telegram|"
+    r"whatsapp|"
+    r"wechat|"
+    r"weixin|"
+    r"微信|"
+    r"微信号|"
+    r"客服|"
+    r"联系|"
+    r"加我|"
+    r"私聊|"
+    r"contact|"
+    r"customer\s*service|"
+    r"扫码|"
+    r"二维码"
+    r")",
+    re.I
+)
 
-def contains_contact(text: str) -> bool:
+
+def contains_contact(text):
 
     if not text:
         return False
@@ -109,35 +147,39 @@ def contains_contact(text: str) -> bool:
     patterns = [
         PHONE_PATTERN,
         TELEGRAM_LINK_PATTERN,
-        USERNAME_PATTERN,
+        TELEGRAM_USERNAME_PATTERN,
         WHATSAPP_PATTERN,
         WECHAT_PATTERN,
-        LINE_PATTERN,
+        CONTACT_KEYWORD_PATTERN,
     ]
 
     for pattern in patterns:
+
         if pattern.search(text):
+
             return True
 
     return False
 
 
-# ============================================================
-# 5. OCR 图片
-# ============================================================
+# =========================================================
+# OCR
+# =========================================================
 
-def ocr_image(image_path: str) -> str:
+def ocr_image(image_path):
 
     try:
 
-        image = Image.open(image_path)
+        image = Image.open(
+            image_path
+        )
 
-        # 转 RGB
+        # RGB
         image = image.convert("RGB")
 
-        # 图片放大，提高 OCR 准确率
         width, height = image.size
 
+        # 图片太小则放大
         if width < 1600:
 
             scale = 1600 / width
@@ -149,269 +191,260 @@ def ocr_image(image_path: str) -> str:
                 )
             )
 
-        # 灰度
-        image = ImageOps.grayscale(image)
-
-        # OCR
         text = pytesseract.image_to_string(
             image,
             lang="eng"
         )
 
-        return text
+        return text or ""
 
     except Exception as e:
 
-        print("OCR ERROR:")
-        print(e)
+        print(
+            "OCR ERROR:",
+            e
+        )
 
         return ""
 
 
-# ============================================================
-# 6. 判断图片是否存在联系方式
-# ============================================================
+def image_contains_contact(
+    image_path
+):
 
-def image_contains_contact(image_path: str) -> bool:
-
-    print("开始 OCR 图片...")
-
-    ocr_text = ocr_image(image_path)
-
-    print("--------------------------------")
-    print("OCR识别结果:")
-    print(ocr_text)
-    print("--------------------------------")
-
-    if not ocr_text.strip():
-
-        print("OCR没有识别到文字")
-
-        return False
-
-    if contains_contact(ocr_text):
-
-        print(
-            "检测到图片中存在联系方式"
-        )
-
-        return True
+    text = ocr_image(
+        image_path
+    )
 
     print(
-        "图片没有检测到联系方式"
+        "========== OCR =========="
     )
 
-    return False
+    print(text)
 
-
-# ============================================================
-# 7. 判断消息是不是今天发布
-# ============================================================
-
-def is_today(message_date) -> bool:
-
-    if not message_date:
-        return False
-
-    now = datetime.now(timezone.utc)
-
-    today_start = now.replace(
-        hour=0,
-        minute=0,
-        second=0,
-        microsecond=0
+    print(
+        "=========================="
     )
 
-    return message_date >= today_start
+    return contains_contact(text)
 
 
-# ============================================================
-# 8. 处理一条消息
-# ============================================================
+# =========================================================
+# 判断是不是今天
+# =========================================================
 
-async def process_message(message, source_name):
+def is_today(message_date):
+
+    now = datetime.now(
+        timezone.utc
+    )
+
+    today = now.date()
+
+    return (
+        message_date.astimezone(
+            timezone.utc
+        ).date()
+        == today
+    )
+
+
+# =========================================================
+# Telegram Client
+# =========================================================
+
+client = TelegramClient(
+    StringSession(
+        TELEGRAM_SESSION
+    ),
+    API_ID,
+    API_HASH
+)
+
+
+# =========================================================
+# 判断消息是否已经处理
+# =========================================================
+
+def message_key(
+    channel,
+    message_id
+):
+
+    return (
+        f"{channel}:{message_id}"
+    )
+
+
+# =========================================================
+# 处理消息
+# =========================================================
+
+async def process_message(
+    source_name,
+    message
+):
 
     if not message:
-        return
 
-    print("")
-    print("=" * 60)
+        return False
 
-    print(
-        f"来源频道: {source_name}"
-    )
+    # ----------------------------------
+    # 只处理今天
+    # ----------------------------------
 
-    print(
-        f"消息ID: {message.id}"
-    )
-
-    print(
-        f"发布时间: {message.date}"
-    )
-
-    print("=" * 60)
-
-
-    # ========================================================
-    # 只处理今天的消息
-    # ========================================================
-
-    if not is_today(message.date):
-
-        print(
-            "跳过：不是今天发布的消息"
-        )
-
-        return
-
-
-    # ========================================================
-    # 获取文字
-    # ========================================================
-
-    text = message.message or ""
-
-
-    # ========================================================
-    # 检查文字联系方式
-    # ========================================================
-
-    if text.strip():
-
-        print("检查消息文字...")
-
-        if contains_contact(text):
-
-            print(
-                "❌ 跳过：文字中检测到联系方式"
-            )
-
-            return
-
-        print(
-            "✅ 文字检查通过"
-        )
-
-
-    # ========================================================
-    # 图片消息
-    # ========================================================
-
-    if isinstance(
-        message.media,
-        MessageMediaPhoto
+    if not is_today(
+        message.date
     ):
 
-        temp_dir = tempfile.mkdtemp()
+        return False
+
+    key = message_key(
+        source_name,
+        message.id
+    )
+
+    # ----------------------------------
+    # 防止重复
+    # ----------------------------------
+
+    if key in processed.get(
+        "messages",
+        []
+    ):
+
+        print(
+            "SKIP DUPLICATE:",
+            key
+        )
+
+        return False
+
+    text = (
+        message.message
+        or ""
+    )
+
+    # ----------------------------------
+    # 文字联系方式检测
+    # ----------------------------------
+
+    if contains_contact(text):
+
+        print(
+            "SKIP CONTACT TEXT:",
+            key
+        )
+
+        processed.setdefault(
+            "messages",
+            []
+        ).append(key)
+
+        save_processed(
+            processed
+        )
+
+        return False
+
+    # =====================================================
+    # 图片
+    # =====================================================
+
+    if message.photo:
 
         image_path = None
 
         try:
 
-            print(
-                "发现图片，开始下载..."
-            )
+            temp_dir = tempfile.mkdtemp()
 
-            image_path = await client.download_media(
-                message.media,
-                file=temp_dir
+            image_path = (
+                await client.download_media(
+                    message,
+                    file=temp_dir
+                )
             )
 
             if not image_path:
 
                 print(
-                    "❌ 图片下载失败"
+                    "IMAGE DOWNLOAD FAILED:",
+                    key
                 )
 
-                return
+                return False
 
-
-            print(
-                f"图片下载完成: {image_path}"
-            )
-
-
-            # =================================================
+            # ----------------------------------
             # OCR
-            # =================================================
+            # ----------------------------------
 
             if image_contains_contact(
                 image_path
             ):
 
                 print(
-                    "❌ 跳过整条消息："
-                    "图片中发现联系方式"
+                    "SKIP CONTACT IMAGE:",
+                    key
                 )
 
-                return
+                processed.setdefault(
+                    "messages",
+                    []
+                ).append(key)
 
+                save_processed(
+                    processed
+                )
 
-            # =================================================
-            # 图片没有联系方式
-            # 发送到目标频道
-            # =================================================
+                return False
 
-            print(
-                "✅ 图片检查通过"
-            )
-
-            print(
-                f"正在发送到: {TARGET_CHANNEL}"
-            )
-
+            # ----------------------------------
+            # 转发图片
+            # ----------------------------------
 
             await client.send_file(
                 TARGET_CHANNEL,
                 image_path,
-                caption=text if text.strip() else None
+                caption=text or None
             )
-
 
             print(
-                "✅ 图片转发成功"
+                "FORWARDED IMAGE:",
+                key
             )
-
 
         except Exception as e:
 
             print(
-                "❌ 图片处理失败:"
+                "IMAGE ERROR:",
+                key,
+                e
             )
 
-            print(e)
-
+            return False
 
         finally:
 
-            # 删除临时文件
-            try:
+            if image_path:
 
-                if temp_dir:
+                try:
 
-                    shutil.rmtree(
-                        temp_dir,
-                        ignore_errors=True
+                    os.remove(
+                        image_path
                     )
 
-            except Exception:
+                except Exception:
 
-                pass
+                    pass
 
-        return
+    # =====================================================
+    # 纯文字
+    # =====================================================
 
-
-    # ========================================================
-    # 纯文字消息
-    # ========================================================
-
-    if text.strip():
+    elif text.strip():
 
         try:
-
-            print(
-                f"正在发送文字到: {TARGET_CHANNEL}"
-            )
 
             await client.send_message(
                 TARGET_CHANNEL,
@@ -419,254 +452,162 @@ async def process_message(message, source_name):
             )
 
             print(
-                "✅ 文字转发成功"
+                "FORWARDED TEXT:",
+                key
             )
 
         except Exception as e:
 
             print(
-                "❌ 文字转发失败:"
+                "TEXT ERROR:",
+                key,
+                e
             )
 
-            print(e)
+            return False
 
-        return
+    else:
 
+        print(
+            "SKIP EMPTY:",
+            key
+        )
 
-    # ========================================================
-    # 其他类型消息
-    # ========================================================
+        return False
 
-    print(
-        "跳过：当前版本只处理文字和图片"
+    # ----------------------------------
+    # 记录成功处理
+    # ----------------------------------
+
+    processed.setdefault(
+        "messages",
+        []
+    ).append(key)
+
+    # 防止 processed.json 无限增长
+    processed["messages"] = (
+        processed["messages"][-5000:]
     )
 
-
-# ============================================================
-# 9. 扫描来源频道
-# ============================================================
-
-async def process_channel(channel):
-
-    print("")
-    print("#" * 60)
-
-    print(
-        f"开始扫描频道: {channel}"
+    save_processed(
+        processed
     )
 
-    print("#" * 60)
+    return True
+
+
+# =========================================================
+# 扫描来源频道
+# =========================================================
+
+async def scan_channel(
+    source
+):
+
+    print(
+        "\n================================"
+    )
+
+    print(
+        "SCANNING:",
+        source
+    )
+
+    print(
+        "================================"
+    )
 
     try:
 
         entity = await client.get_entity(
-            channel
+            source
         )
 
-    except Exception as e:
-
-        print(
-            f"❌ 无法访问频道: {channel}"
-        )
-
-        print(e)
-
-        return
-
-
-    count = 0
-
-    try:
+        count = 0
 
         async for message in client.iter_messages(
             entity,
             limit=200
         ):
 
-            # 因为消息按最新→旧排序
-            # 遇到昨天的消息以后，可以停止扫描
-            if message.date and not is_today(
+            if not is_today(
                 message.date
             ):
 
-                print(
-                    "已经扫描到昨天的消息，"
-                    "停止当前频道扫描。"
-                )
-
+                # iter_messages 是倒序，
+                # 遇到昨天消息就可以结束
                 break
 
-
             await process_message(
-                message,
-                channel
+                source,
+                message
             )
 
             count += 1
 
+        print(
+            "MESSAGES CHECKED:",
+            count
+        )
 
     except Exception as e:
 
         print(
-            f"❌ 扫描频道失败: {channel}"
+            "CHANNEL ERROR:",
+            source,
+            e
         )
 
-        print(e)
 
-        return
-
-
-    print("")
-    print(
-        f"频道 {channel} 扫描完成"
-    )
-
-    print(
-        f"本次检查消息数量: {count}"
-    )
-
-
-# ============================================================
-# 10. 主程序
-# ============================================================
+# =========================================================
+# 主程序
+# =========================================================
 
 async def main():
 
-    print("")
-    print("=" * 60)
-    print("Telegram Channel Forwarder")
-    print("=" * 60)
-
     print(
-        f"来源频道数量: {len(SOURCE_CHANNELS)}"
+        "================================"
     )
 
     print(
-        f"目标频道: {TARGET_CHANNEL}"
+        "Telegram Forwarder Starting..."
     )
-
-    print("=" * 60)
-
-
-    # ========================================================
-    # 连接 Telegram
-    # ========================================================
 
     print(
-        "正在连接 Telegram..."
+        "================================"
     )
-
-    await client.connect()
-
-
-    # ========================================================
-    # 检查 Session
-    # ========================================================
-
-    if not await client.is_user_authorized():
-
-        raise RuntimeError(
-            "TELEGRAM_SESSION 无效或已经失效。"
-            "请重新生成 Session。"
-        )
-
 
     print(
-        "✅ Telegram 登录成功"
+        "SOURCE CHANNELS:",
+        SOURCE_CHANNELS
     )
 
+    print(
+        "TARGET CHANNEL:",
+        TARGET_CHANNEL
+    )
 
-    # ========================================================
-    # 获取当前账号
-    # ========================================================
+    await client.start()
 
-    try:
+    print(
+        "Telegram login successful."
+    )
 
-        me = await client.get_me()
+    for source in SOURCE_CHANNELS:
 
-        if me:
-
-            print(
-                f"登录账号: "
-                f"{me.first_name or ''} "
-                f"{me.last_name or ''}"
-            )
-
-            if me.username:
-
-                print(
-                    f"用户名: @{me.username}"
-                )
-
-    except Exception as e:
-
-        print(
-            "获取账号信息失败:"
+        await scan_channel(
+            source
         )
-
-        print(e)
-
-
-    # ========================================================
-    # 检查来源频道
-    # ========================================================
-
-    if not SOURCE_CHANNELS:
-
-        raise RuntimeError(
-            "SOURCE_CHANNELS 没有设置。"
-        )
-
-
-    # ========================================================
-    # 开始扫描
-    # ========================================================
-
-    for channel in SOURCE_CHANNELS:
-
-        await process_channel(
-            channel
-        )
-
-
-    print("")
-    print("=" * 60)
-    print("全部频道处理完成")
-    print("=" * 60)
-
-
-    # ========================================================
-    # 断开 Telegram
-    # ========================================================
 
     await client.disconnect()
 
+    print(
+        "\nDONE."
+    )
 
-# ============================================================
-# 11. 启动
-# ============================================================
 
 if __name__ == "__main__":
 
-    try:
-
-        asyncio.run(
-            main()
-        )
-
-    except KeyboardInterrupt:
-
-        print(
-            "程序被手动停止"
-        )
-
-    except Exception as e:
-
-        print("")
-        print("=" * 60)
-        print("程序运行失败")
-        print("=" * 60)
-
-        print(e)
-
-        raise
+    asyncio.run(
+        main()
+    )
