@@ -1,12 +1,16 @@
 name: Telegram Forwarder
 
 on:
+
   workflow_dispatch:
 
   schedule:
+
     - cron: "7,22,37,52 * * * *"
 
+
 jobs:
+
   forward:
 
     runs-on: ubuntu-latest
@@ -16,26 +20,48 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+
       - name: Setup Python
         uses: actions/setup-python@v5
+
         with:
           python-version: "3.11"
 
+
       - name: Install Tesseract
         run: |
-          sudo apt-get update
-          sudo apt-get install -y tesseract-ocr
 
-      - name: Install dependencies
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            tesseract-ocr
+
+
+      - name: Install Python packages
         run: |
-          pip install -r requirements.txt
+
+          python -m pip install \
+            --upgrade pip
+
+          pip install \
+            -r requirements.txt
+
 
       - name: Run Telegram Forwarder
         env:
+
           API_ID: ${{ secrets.API_ID }}
+
           API_HASH: ${{ secrets.API_HASH }}
+
+          PHONE: ${{ secrets.PHONE }}
+
           TELEGRAM_SESSION: ${{ secrets.TELEGRAM_SESSION }}
+
           SOURCE_CHANNELS: ${{ secrets.SOURCE_CHANNELS }}
+
           TARGET_CHANNEL: ${{ secrets.TARGET_CHANNEL }}
+
         run: |
+
           python main.py
