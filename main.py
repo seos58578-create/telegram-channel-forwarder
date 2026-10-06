@@ -197,26 +197,27 @@ def image_contains_contact(image_path):
 # 判断是否今天
 # =========================
 
+from datetime import datetime, timezone, timedelta
+
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+
 def is_today(message):
 
-    from datetime import datetime, timezone
-
     if not message.date:
-
         return False
 
     message_date = (
         message.date
-        .astimezone(timezone.utc)
+        .astimezone(BEIJING_TZ)
         .date()
     )
 
     today = datetime.now(
-        timezone.utc
+        BEIJING_TZ
     ).date()
 
     return message_date == today
-
 
 # =========================
 # 处理一条消息
