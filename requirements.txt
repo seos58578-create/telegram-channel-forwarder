@@ -2,4 +2,3 @@ telethon
 pytesseract
 Pillow
 opencv-python-headless
-python-dotenv
