@@ -1,17 +1,24 @@
-name: Telegram Forwarder
+name: Telegram Channel Forwarder
 
 on:
 
+  # GitHub Actions 页面手动运行
   workflow_dispatch:
 
+  # 每 60 分钟运行一次
   schedule:
-
     - cron: "7,22,37,52 * * * *"
 
 
+# 允许 Actions 提交 processed.json
 permissions:
-
   contents: write
+
+
+# 防止多个运行同时修改 processed.json
+concurrency:
+  group: telegram-channel-forwarder
+  cancel-in-progress: false
 
 
 jobs:
@@ -20,11 +27,12 @@ jobs:
 
     runs-on: ubuntu-latest
 
+
     steps:
 
-      # ==========================================
-      # 1. 获取最新代码和 processed.json
-      # ==========================================
+      # =====================================================
+      # 1. 拉取代码
+      # =====================================================
 
       - name: Checkout repository
 
@@ -34,9 +42,9 @@ jobs:
           fetch-depth: 0
 
 
-      # ==========================================
-      # 2. 安装 Python
-      # ==========================================
+      # =====================================================
+      # 2. Python
+      # =====================================================
 
       - name: Setup Python
 
@@ -46,11 +54,11 @@ jobs:
           python-version: "3.11"
 
 
-      # ==========================================
-      # 3. 安装 Tesseract
-      # ==========================================
+      # =====================================================
+      # 3. 安装 Tesseract OCR
+      # =====================================================
 
-      - name: Install Tesseract
+      - name: Install Tesseract OCR
 
         run: |
 
@@ -58,27 +66,28 @@ jobs:
 
           sudo apt-get install -y \
             tesseract-ocr \
-            tesseract-ocr-eng
+            tesseract-ocr-eng \
+            tesseract-ocr-chi-sim \
+            tesseract-ocr-vie \
+            tesseract-ocr-por
 
 
-      # ==========================================
+      # =====================================================
       # 4. 安装 Python 依赖
-      # ==========================================
+      # =====================================================
 
-      - name: Install Python packages
+      - name: Install Python dependencies
 
         run: |
 
-          python -m pip install \
-            --upgrade pip
+          python -m pip install --upgrade pip
 
-          pip install \
-            -r requirements.txt
+          python -m pip install -r requirements.txt
 
 
-      # ==========================================
+      # =====================================================
       # 5. 运行 Telegram 转发程序
-      # ==========================================
+      # =====================================================
 
       - name: Run Telegram Forwarder
 
@@ -94,29 +103,27 @@ jobs:
 
           TARGET_CHANNEL: ${{ secrets.TARGET_CHANNEL }}
 
+          # 每个源频道最多读取最近 100 条
+          SCAN_LIMIT: "100"
+
         run: |
 
           python main.py
 
 
-      # ==========================================
+      # =====================================================
       # 6. 保存 processed.json
-      # ==========================================
+      # =====================================================
 
-      - name: Save processed messages
+      - name: Commit processed.json
 
         run: |
 
-          git config \
-            user.name "github-actions[bot]"
+          git config user.name "github-actions[bot]"
 
-          git config \
-            user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
-
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add processed.json
-
 
           if git diff --cached --quiet; then
 
@@ -124,8 +131,7 @@ jobs:
 
           else
 
-            git commit \
-              -m "Update processed messages"
+            git commit -m "Update processed messages"
 
             git push
 
