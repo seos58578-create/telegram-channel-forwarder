@@ -10,7 +10,7 @@ import cv2
 import pytesseract
 from PIL import Image, ImageDraw, ImageFont
 
-from telethon import TelegramClient
+from telethon import TelegramClient, utils
 from telethon.sessions import StringSession
 
 from telegram import Bot, InputMediaPhoto
@@ -24,7 +24,6 @@ from telegram.error import TimedOut, NetworkError
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 
-# 必须是 Telethon StringSession
 TELEGRAM_SESSION = os.environ["TELEGRAM_SESSION"]
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -37,7 +36,10 @@ SOURCE_CHANNELS = [
 
 TARGET_CHANNEL_RAW = os.environ["TARGET_CHANNEL"].strip()
 
-SCAN_LIMIT_RAW = os.environ.get("SCAN_LIMIT", "0").strip()
+SCAN_LIMIT_RAW = os.environ.get(
+    "SCAN_LIMIT",
+    "0"
+).strip()
 
 try:
     SCAN_LIMIT = int(SCAN_LIMIT_RAW)
@@ -49,14 +51,18 @@ except Exception:
 # 北京时间
 # ============================================================
 
-BEIJING_TZ = timezone(timedelta(hours=8))
+BEIJING_TZ = timezone(
+    timedelta(hours=8)
+)
 
 
 # ============================================================
 # 文件
 # ============================================================
 
-PROCESSED_FILE = Path("processed.json")
+PROCESSED_FILE = Path(
+    "processed.json"
+)
 
 
 # ============================================================
@@ -64,30 +70,23 @@ PROCESSED_FILE = Path("processed.json")
 # ============================================================
 
 def normalize_target_channel(value):
-    """
-    支持：
-
-    @username
-    username
-    https://t.me/username
-
-    私有频道：
-
-    -100xxxxxxxxxx
-
-    自动清理空格。
-    """
 
     value = str(value).strip()
 
-    if value.startswith("https://t.me/"):
+    if value.startswith(
+        "https://t.me/"
+    ):
+
         value = value.replace(
             "https://t.me/",
             "",
             1
         )
 
-    if value.startswith("http://t.me/"):
+    if value.startswith(
+        "http://t.me/"
+    ):
+
         value = value.replace(
             "http://t.me/",
             "",
@@ -105,10 +104,22 @@ TARGET_CHANNEL = normalize_target_channel(
 
 
 # ============================================================
+# Bot 最终实际使用的目标
+#
+# 注意：
+# TARGET_CHANNEL 是 GitHub Secret
+# BOT_TARGET_CHANNEL 是程序自动解析后的目标
+# ============================================================
+
+BOT_TARGET_CHANNEL = None
+
+
+# ============================================================
 # 联系方式
 # ============================================================
 
 CONTACT_PATTERNS = [
+
     (
         "TELEGRAM_LINK",
         re.compile(
@@ -183,8 +194,14 @@ PHONE_CONTACT_TYPES = {
 # 打印
 # ============================================================
 
-def print_line(char="=", length=70):
-    print(char * length)
+def print_line(
+    char="=",
+    length=70
+):
+
+    print(
+        char * length
+    )
 
 
 # ============================================================
@@ -192,15 +209,20 @@ def print_line(char="=", length=70):
 # ============================================================
 
 def now_beijing():
+
     return datetime.now(
         BEIJING_TZ
     )
 
 
-def message_date_beijing(message):
+def message_date_beijing(
+    message
+):
+
     dt = message.date
 
     if dt.tzinfo is None:
+
         dt = dt.replace(
             tzinfo=timezone.utc
         )
@@ -210,12 +232,16 @@ def message_date_beijing(message):
     )
 
 
-def is_today_beijing(message):
+def is_today_beijing(
+    message
+):
+
     return (
         message_date_beijing(
             message
         ).date()
-        == now_beijing().date()
+        ==
+        now_beijing().date()
     )
 
 
@@ -258,14 +284,9 @@ def load_processed():
         return set()
 
 
-def save_processed(processed):
-    """
-    修复：
-    TypeError: '<' not supported
-    between instances of 'int' and 'str'
-
-    统一转字符串，再按照数字 ID 排序。
-    """
+def save_processed(
+    processed
+):
 
     normalized = {
         str(x)
@@ -275,6 +296,7 @@ def save_processed(processed):
     def sort_key(value):
 
         try:
+
             return (
                 0,
                 int(value)
@@ -293,11 +315,14 @@ def save_processed(processed):
     )
 
     data = {
-        "messages": sorted_messages[-10000:]
+        "messages":
+            sorted_messages[-10000:]
     }
 
-    tmp_file = PROCESSED_FILE.with_suffix(
-        ".tmp"
+    tmp_file = (
+        PROCESSED_FILE.with_suffix(
+            ".tmp"
+        )
     )
 
     with open(
@@ -322,22 +347,30 @@ def save_processed(processed):
 # 文字联系方式检测
 # ============================================================
 
-def detect_contact_text(text):
+def detect_contact_text(
+    text
+):
 
     if not text:
+
         return None
 
     text = str(text)
 
     for contact_type, pattern in CONTACT_PATTERNS:
 
-        match = pattern.search(text)
+        match = pattern.search(
+            text
+        )
 
         if match:
 
             return {
-                "type": contact_type,
-                "match": match.group(0),
+                "type":
+                    contact_type,
+
+                "match":
+                    match.group(0),
             }
 
     return None
@@ -347,9 +380,12 @@ def detect_contact_text(text):
 # OCR
 # ============================================================
 
-def normalize_ocr_text(text):
+def normalize_ocr_text(
+    text
+):
 
     if not text:
+
         return ""
 
     text = text.replace(
@@ -381,10 +417,7 @@ def ocr_image_variants(
 
             return results
 
-        # ----------------------------------------------------
         # ORIGINAL
-        # ----------------------------------------------------
-
         text = pytesseract.image_to_string(
             image,
             lang="eng+chi_sim+vie+por",
@@ -393,14 +426,13 @@ def ocr_image_variants(
         results.append(
             (
                 "ORIGINAL",
-                normalize_ocr_text(text)
+                normalize_ocr_text(
+                    text
+                )
             )
         )
 
-        # ----------------------------------------------------
         # GRAYSCALE
-        # ----------------------------------------------------
-
         gray = cv2.cvtColor(
             image,
             cv2.COLOR_BGR2GRAY
@@ -414,14 +446,13 @@ def ocr_image_variants(
         results.append(
             (
                 "GRAYSCALE",
-                normalize_ocr_text(text)
+                normalize_ocr_text(
+                    text
+                )
             )
         )
 
-        # ----------------------------------------------------
         # ENHANCED
-        # ----------------------------------------------------
-
         enhanced = cv2.resize(
             gray,
             None,
@@ -444,14 +475,13 @@ def ocr_image_variants(
         results.append(
             (
                 "ENHANCED",
-                normalize_ocr_text(text)
+                normalize_ocr_text(
+                    text
+                )
             )
         )
 
-        # ----------------------------------------------------
         # THRESHOLD
-        # ----------------------------------------------------
-
         threshold = cv2.threshold(
             enhanced,
             0,
@@ -468,7 +498,9 @@ def ocr_image_variants(
         results.append(
             (
                 "THRESHOLD",
-                normalize_ocr_text(text)
+                normalize_ocr_text(
+                    text
+                )
             )
         )
 
@@ -494,10 +526,6 @@ def detect_contact_from_ocr(
         return None
 
     phone_matches = []
-
-    # --------------------------------------------------------
-    # 强联系方式
-    # --------------------------------------------------------
 
     for variant, text in ocr_results:
 
@@ -532,10 +560,6 @@ def detect_contact_from_ocr(
                 )
             )
 
-    # --------------------------------------------------------
-    # 手机号至少识别 2 次
-    # --------------------------------------------------------
-
     if len(phone_matches) >= 2:
 
         return phone_matches[0][1]
@@ -563,10 +587,7 @@ def detect_qr_code(
 
         detector = cv2.QRCodeDetector()
 
-        # ----------------------------------------------------
         # 多二维码
-        # ----------------------------------------------------
-
         try:
 
             result = (
@@ -591,10 +612,7 @@ def detect_qr_code(
         except Exception:
             pass
 
-        # ----------------------------------------------------
         # 单二维码
-        # ----------------------------------------------------
-
         try:
 
             data, points, _ = (
@@ -643,9 +661,14 @@ def inspect_image(
         )
 
         return {
-            "blocked": True,
-            "type": "QR_CODE",
-            "match": qr,
+            "blocked":
+                True,
+
+            "type":
+                "QR_CODE",
+
+            "match":
+                qr,
         }
 
     print(
@@ -665,9 +688,14 @@ def inspect_image(
         )
 
         return {
-            "blocked": True,
-            "type": contact["type"],
-            "match": contact["match"],
+            "blocked":
+                True,
+
+            "type":
+                contact["type"],
+
+            "match":
+                contact["match"],
         }
 
     print(
@@ -675,9 +703,14 @@ def inspect_image(
     )
 
     return {
-        "blocked": False,
-        "type": None,
-        "match": None,
+        "blocked":
+            False,
+
+        "type":
+            None,
+
+        "match":
+            None,
     }
 
 
@@ -865,6 +898,451 @@ bot = Bot(
 
 
 # ============================================================
+# BOT 目标诊断
+# ============================================================
+
+async def diagnose_bot_target(
+    target_entity
+):
+
+    global BOT_TARGET_CHANNEL
+
+    print_line()
+
+    print(
+        "🤖 BOT TARGET DIAGNOSTIC"
+    )
+
+    print_line()
+
+    # --------------------------------------------------------
+    # 1. Bot Token
+    # --------------------------------------------------------
+
+    print(
+        "🔎 1. CHECK BOT TOKEN..."
+    )
+
+    try:
+
+        bot_me = await bot.get_me()
+
+        print(
+            "   ✅ BOT TOKEN VALID"
+        )
+
+        print(
+            f"   BOT ID: "
+            f"{bot_me.id}"
+        )
+
+        print(
+            f"   BOT USERNAME: "
+            f"@{bot_me.username}"
+            if bot_me.username
+            else
+            "   BOT USERNAME: None"
+        )
+
+        print(
+            f"   BOT NAME: "
+            f"{bot_me.first_name or ''}"
+        )
+
+    except Exception as e:
+
+        print(
+            "   ❌ BOT TOKEN INVALID"
+        )
+
+        print(
+            f"   {type(e).__name__}: {e}"
+        )
+
+        raise RuntimeError(
+            "BOT_TOKEN 无效，请检查 GitHub Secrets 的 BOT_TOKEN"
+        )
+
+    # --------------------------------------------------------
+    # 2. Telethon 目标信息
+    # --------------------------------------------------------
+
+    print(
+        "\n🔎 2. TELETHON TARGET INFO..."
+    )
+
+    target_id = getattr(
+        target_entity,
+        "id",
+        None
+    )
+
+    target_title = getattr(
+        target_entity,
+        "title",
+        None
+    )
+
+    target_username = getattr(
+        target_entity,
+        "username",
+        None
+    )
+
+    print(
+        f"   TITLE: "
+        f"{target_title}"
+    )
+
+    print(
+        f"   TELETHON ID: "
+        f"{target_id}"
+    )
+
+    print(
+        f"   USERNAME: "
+        f"@{target_username}"
+        if target_username
+        else
+        "   USERNAME: 无"
+    )
+
+    # --------------------------------------------------------
+    # 3. 自动生成 Bot API 目标
+    # --------------------------------------------------------
+
+    print(
+        "\n🔎 3. GENERATE BOT TARGET..."
+    )
+
+    # 公开频道
+    if target_username:
+
+        BOT_TARGET_CHANNEL = (
+            f"@{target_username}"
+        )
+
+        print(
+            "   ✅ PUBLIC CHANNEL"
+        )
+
+        print(
+            f"   BOT TARGET: "
+            f"{BOT_TARGET_CHANNEL}"
+        )
+
+    else:
+
+        # 私有频道 / 无 username
+        try:
+
+            marked_peer_id = (
+                utils.get_peer_id(
+                    target_entity
+                )
+            )
+
+            BOT_TARGET_CHANNEL = int(
+                marked_peer_id
+            )
+
+            print(
+                "   ✅ PRIVATE CHANNEL ID GENERATED"
+            )
+
+            print(
+                f"   BOT TARGET: "
+                f"{BOT_TARGET_CHANNEL}"
+            )
+
+        except Exception as e:
+
+            print(
+                "   ❌ 无法生成 Bot Channel ID"
+            )
+
+            print(
+                f"   {type(e).__name__}: {e}"
+            )
+
+            raise RuntimeError(
+                "无法生成目标频道的 -100 ID"
+            )
+
+    # --------------------------------------------------------
+    # 4. Bot get_chat
+    # --------------------------------------------------------
+
+    print(
+        "\n🔎 4. BOT GET CHAT..."
+    )
+
+    try:
+
+        bot_chat = await bot.get_chat(
+            chat_id=BOT_TARGET_CHANNEL
+        )
+
+        print(
+            "   ✅ BOT CAN ACCESS TARGET"
+        )
+
+        print(
+            f"   CHAT ID: "
+            f"{bot_chat.id}"
+        )
+
+        print(
+            f"   CHAT TYPE: "
+            f"{bot_chat.type}"
+        )
+
+        print(
+            f"   CHAT TITLE: "
+            f"{getattr(bot_chat, 'title', None)}"
+        )
+
+        print(
+            f"   CHAT USERNAME: "
+            f"@{bot_chat.username}"
+            if getattr(
+                bot_chat,
+                "username",
+                None
+            )
+            else
+            "   CHAT USERNAME: 无"
+        )
+
+    except Exception as e:
+
+        error_text = str(e)
+
+        print(
+            "   ❌ BOT CANNOT ACCESS TARGET"
+        )
+
+        print(
+            f"   {type(e).__name__}: "
+            f"{error_text}"
+        )
+
+        if "Chat not found" in error_text:
+
+            print_line("-")
+
+            print(
+                "🚨 核心问题：Bot API 找不到目标频道"
+            )
+
+            print()
+
+            print(
+                "请检查以下 3 项："
+            )
+
+            print()
+
+            print(
+                "① Shopping88bot 是否已经加入目标频道"
+            )
+
+            print(
+                "② Shopping88bot 是否已经设置为管理员"
+            )
+
+            print(
+                "③ 管理员权限是否允许「发布消息」"
+            )
+
+            print()
+
+            print(
+                "程序自动识别出的 Bot TARGET 是："
+            )
+
+            print(
+                f"👉 {BOT_TARGET_CHANNEL}"
+            )
+
+            print()
+
+            print(
+                "如果这里显示 -100xxxxxxxxxx，"
+            )
+
+            print(
+                "就说明你的 TARGET_CHANNEL 已经被程序正确解析。"
+            )
+
+            print(
+                "此时重点检查 Bot 是否真的在这个频道。"
+            )
+
+            print_line("-")
+
+        raise RuntimeError(
+            "BOT 无法访问目标频道，已停止运行"
+        )
+
+    # --------------------------------------------------------
+    # 5. Bot 自身频道成员身份
+    # --------------------------------------------------------
+
+    print(
+        "\n🔎 5. CHECK BOT MEMBERSHIP..."
+    )
+
+    try:
+
+        member = await bot.get_chat_member(
+            chat_id=BOT_TARGET_CHANNEL,
+            user_id=bot_me.id
+        )
+
+        status = getattr(
+            member,
+            "status",
+            None
+        )
+
+        print(
+            f"   BOT STATUS: "
+            f"{status}"
+        )
+
+        # ----------------------------------------------------
+        # administrator
+        # ----------------------------------------------------
+
+        if status == "administrator":
+
+            print(
+                "   ✅ BOT IS ADMINISTRATOR"
+            )
+
+            can_post = getattr(
+                member,
+                "can_post_messages",
+                None
+            )
+
+            print(
+                f"   CAN POST MESSAGES: "
+                f"{can_post}"
+            )
+
+            if can_post is False:
+
+                print()
+                print(
+                    "❌ Bot 是管理员，但没有「发布消息」权限"
+                )
+
+                print(
+                    "请到频道 → 管理员 → Shopping88bot"
+                )
+
+                print(
+                    "打开「发布消息」权限"
+                )
+
+                raise RuntimeError(
+                    "BOT 没有发布消息权限"
+                )
+
+        # ----------------------------------------------------
+        # creator
+        # ----------------------------------------------------
+
+        elif status == "creator":
+
+            print(
+                "   ✅ BOT IS CHANNEL CREATOR"
+            )
+
+        # ----------------------------------------------------
+        # member
+        # ----------------------------------------------------
+
+        elif status == "member":
+
+            print(
+                "   ❌ BOT 是普通成员"
+            )
+
+            print(
+                "   Bot 必须设置为频道管理员才能发布消息"
+            )
+
+            raise RuntimeError(
+                "BOT 不是管理员"
+            )
+
+        # ----------------------------------------------------
+        # left / kicked
+        # ----------------------------------------------------
+
+        elif status in {
+            "left",
+            "kicked"
+        }:
+
+            print(
+                "   ❌ BOT 不在目标频道"
+            )
+
+            print(
+                "   请把 Bot 加入频道并设置为管理员"
+            )
+
+            raise RuntimeError(
+                "BOT 不在目标频道"
+            )
+
+        else:
+
+            print(
+                f"   ⚠️ 未识别 Bot 状态：{status}"
+            )
+
+    except RuntimeError:
+
+        raise
+
+    except Exception as e:
+
+        print(
+            "   ❌ BOT MEMBERSHIP CHECK FAILED"
+        )
+
+        print(
+            f"   {type(e).__name__}: {e}"
+        )
+
+        raise RuntimeError(
+            "无法确认 Bot 在目标频道的权限"
+        )
+
+    # --------------------------------------------------------
+    # 最终诊断成功
+    # --------------------------------------------------------
+
+    print_line()
+
+    print(
+        "✅ BOT TARGET DIAGNOSTIC PASSED"
+    )
+
+    print(
+        f"BOT WILL PUBLISH TO: "
+        f"{BOT_TARGET_CHANNEL}"
+    )
+
+    print_line()
+
+
+# ============================================================
 # Bot 发送文字
 # ============================================================
 
@@ -880,7 +1358,7 @@ async def bot_send_text(
         try:
 
             await bot.send_message(
-                chat_id=TARGET_CHANNEL,
+                chat_id=BOT_TARGET_CHANNEL,
                 text=text
             )
 
@@ -907,38 +1385,11 @@ async def bot_send_text(
                 f"{e}"
             )
 
-            # ------------------------------------------------
-            # Chat not found
-            # ------------------------------------------------
-
             if "Chat not found" in str(e):
 
-                print()
                 print(
-                    "🚨 BOT 找不到目标频道"
+                    "🚨 BOT TARGET CHAT NOT FOUND"
                 )
-
-                print(
-                    "请检查："
-                )
-
-                print(
-                    "1. Bot 是否已经加入目标频道"
-                )
-
-                print(
-                    "2. Bot 是否为管理员"
-                )
-
-                print(
-                    "3. TARGET_CHANNEL 是否正确"
-                )
-
-                print(
-                    "4. 私有频道请使用 -100xxxxxxxxxx"
-                )
-
-                print()
 
             return False
 
@@ -967,7 +1418,7 @@ async def bot_send_photo(
             ) as photo:
 
                 await bot.send_photo(
-                    chat_id=TARGET_CHANNEL,
+                    chat_id=BOT_TARGET_CHANNEL,
                     photo=photo,
                     caption=caption or None
                 )
@@ -997,28 +1448,9 @@ async def bot_send_photo(
 
             if "Chat not found" in str(e):
 
-                print()
                 print(
-                    "🚨 BOT 找不到目标频道"
+                    "🚨 BOT TARGET CHAT NOT FOUND"
                 )
-
-                print(
-                    "请检查 TARGET_CHANNEL"
-                )
-
-                print(
-                    "公开频道：@频道用户名"
-                )
-
-                print(
-                    "私有频道：-100xxxxxxxxxx"
-                )
-
-                print(
-                    "并确认 Bot 是频道管理员"
-                )
-
-                print()
 
             return False
 
@@ -1037,7 +1469,6 @@ async def bot_send_media_group(
 
         return False
 
-    # Telegram Bot API 每组最多 10 张
     chunks = [
         image_items[i:i + 10]
         for i in range(
@@ -1108,7 +1539,7 @@ async def bot_send_media_group(
                     )
 
                 await bot.send_media_group(
-                    chat_id=TARGET_CHANNEL,
+                    chat_id=BOT_TARGET_CHANNEL,
                     media=media
                 )
 
@@ -1158,28 +1589,9 @@ async def bot_send_media_group(
 
                 if "Chat not found" in str(e):
 
-                    print()
                     print(
-                        "🚨 BOT 找不到目标频道"
+                        "🚨 BOT TARGET CHAT NOT FOUND"
                     )
-
-                    print(
-                        "请检查 TARGET_CHANNEL"
-                    )
-
-                    print(
-                        "公开频道：@频道用户名"
-                    )
-
-                    print(
-                        "私有频道：-100xxxxxxxxxx"
-                    )
-
-                    print(
-                        "并确认 Bot 是管理员"
-                    )
-
-                    print()
 
                 return False
 
@@ -1223,9 +1635,11 @@ async def collect_today_messages(
     all_messages = []
 
     print_line()
+
     print(
         "COLLECT TODAY MESSAGES"
     )
+
     print_line()
 
     for source_index, source in enumerate(
@@ -1269,7 +1683,8 @@ async def collect_today_messages(
 
                 if (
                     message_time.date()
-                    < now_beijing().date()
+                    <
+                    now_beijing().date()
                 ):
 
                     break
@@ -1305,10 +1720,6 @@ async def collect_today_messages(
             f"   TODAY MESSAGES: "
             f"{count}"
         )
-
-    # --------------------------------------------------------
-    # 多频道统一时间排序
-    # --------------------------------------------------------
 
     all_messages.sort(
         key=lambda item: (
@@ -1409,10 +1820,6 @@ def build_publish_groups(
                 }
             )
 
-    # --------------------------------------------------------
-    # 相册内部排序
-    # --------------------------------------------------------
-
     for group in groups:
 
         if group["type"] == "album":
@@ -1421,10 +1828,6 @@ def build_publish_groups(
                 key=lambda x:
                     x["message"].id
             )
-
-    # --------------------------------------------------------
-    # 整体排序
-    # --------------------------------------------------------
 
     groups.sort(
         key=lambda x: (
@@ -1491,27 +1894,26 @@ async def prepare_image(
 
     original_path = (
         Path(work_dir)
-        / f"original_{message_id}.jpg"
+        /
+        f"original_{message_id}.jpg"
     )
 
     watermark_path = (
         Path(work_dir)
-        / f"watermark_{message_id}.jpg"
+        /
+        f"watermark_{message_id}.jpg"
     )
 
     print(
         f"\n🖼 MESSAGE {message_id}"
     )
 
-    # --------------------------------------------------------
-    # Caption 检测
-    # --------------------------------------------------------
-
     caption = (
         message.message
         or ""
     ).strip()
 
+    # Caption 联系方式
     if caption:
 
         caption_contact = (
@@ -1530,18 +1932,23 @@ async def prepare_image(
             )
 
             return {
-                "blocked": True,
-                "failed": False,
+                "blocked":
+                    True,
+
+                "failed":
+                    False,
+
                 "reason":
                     "CAPTION_CONTACT",
-                "output_path": None,
-                "caption": caption
+
+                "output_path":
+                    None,
+
+                "caption":
+                    caption
             }
 
-    # --------------------------------------------------------
     # 下载
-    # --------------------------------------------------------
-
     print(
         "   ⬇️ DOWNLOAD IMAGE..."
     )
@@ -1558,12 +1965,20 @@ async def prepare_image(
         )
 
         return {
-            "blocked": False,
-            "failed": True,
+            "blocked":
+                False,
+
+            "failed":
+                True,
+
             "reason":
                 "DOWNLOAD_FAILED",
-            "output_path": None,
-            "caption": caption
+
+            "output_path":
+                None,
+
+            "caption":
+                caption
         }
 
     print(
@@ -1571,10 +1986,7 @@ async def prepare_image(
         f"{os.path.getsize(original_path)} bytes"
     )
 
-    # --------------------------------------------------------
     # QR + OCR
-    # --------------------------------------------------------
-
     inspection = inspect_image(
         original_path
     )
@@ -1587,18 +1999,23 @@ async def prepare_image(
         )
 
         return {
-            "blocked": True,
-            "failed": False,
+            "blocked":
+                True,
+
+            "failed":
+                False,
+
             "reason":
                 inspection["type"],
-            "output_path": None,
-            "caption": caption
+
+            "output_path":
+                None,
+
+            "caption":
+                caption
         }
 
-    # --------------------------------------------------------
     # 水印
-    # --------------------------------------------------------
-
     print(
         "   💧 ADD WATERMARK..."
     )
@@ -1616,12 +2033,20 @@ async def prepare_image(
         )
 
         return {
-            "blocked": False,
-            "failed": True,
+            "blocked":
+                False,
+
+            "failed":
+                True,
+
             "reason":
                 "WATERMARK_FAILED",
-            "output_path": None,
-            "caption": caption
+
+            "output_path":
+                None,
+
+            "caption":
+                caption
         }
 
     print(
@@ -1629,12 +2054,20 @@ async def prepare_image(
     )
 
     return {
-        "blocked": False,
-        "failed": False,
-        "reason": None,
+        "blocked":
+            False,
+
+        "failed":
+            False,
+
+        "reason":
+            None,
+
         "output_path":
             str(watermark_path),
-        "caption": caption
+
+        "caption":
+            caption
     }
 
 
@@ -1740,10 +2173,6 @@ async def process_single_image(
         work_dir
     )
 
-    # --------------------------------------------------------
-    # 被过滤
-    # --------------------------------------------------------
-
     if result["blocked"]:
 
         processed.add(
@@ -1751,10 +2180,6 @@ async def process_single_image(
         )
 
         return
-
-    # --------------------------------------------------------
-    # 处理失败
-    # --------------------------------------------------------
 
     if result.get(
         "failed"
@@ -1825,10 +2250,6 @@ async def process_album(
 
     prepared = []
 
-    # --------------------------------------------------------
-    # 每张图片单独识别
-    # --------------------------------------------------------
-
     for index, item in enumerate(
         items,
         start=1
@@ -1842,7 +2263,6 @@ async def process_album(
             f"MSG {message.id}"
         )
 
-        # 已处理的单张图片不重复处理
         if str(
             message.id
         ) in processed:
@@ -1857,10 +2277,6 @@ async def process_album(
             message,
             work_dir
         )
-
-        # ----------------------------------------------------
-        # 过滤
-        # ----------------------------------------------------
 
         if result["blocked"]:
 
@@ -1879,10 +2295,6 @@ async def process_album(
 
             continue
 
-        # ----------------------------------------------------
-        # 失败
-        # ----------------------------------------------------
-
         if result.get(
             "failed"
         ):
@@ -1893,10 +2305,6 @@ async def process_album(
             )
 
             continue
-
-        # ----------------------------------------------------
-        # 保留
-        # ----------------------------------------------------
 
         prepared.append(
             {
@@ -1915,10 +2323,6 @@ async def process_album(
             }
         )
 
-    # --------------------------------------------------------
-    # 没有合格图片
-    # --------------------------------------------------------
-
     if not prepared:
 
         print(
@@ -1928,10 +2332,7 @@ async def process_album(
 
         return
 
-    # --------------------------------------------------------
     # 只剩一张
-    # --------------------------------------------------------
-
     if len(prepared) == 1:
 
         item = prepared[0]
@@ -1972,10 +2373,7 @@ async def process_album(
 
         return
 
-    # --------------------------------------------------------
-    # 多张图片
-    # --------------------------------------------------------
-
+    # 多张
     print(
         f"\n📤 SEND "
         f"{len(prepared)} "
@@ -2019,6 +2417,8 @@ async def process_album(
 
 async def main():
 
+    global BOT_TARGET_CHANNEL
+
     print_line()
 
     print(
@@ -2038,7 +2438,12 @@ async def main():
     )
 
     print(
-        "TARGET CHANNEL:",
+        "TARGET CHANNEL RAW:",
+        TARGET_CHANNEL_RAW
+    )
+
+    print(
+        "TARGET CHANNEL NORMALIZED:",
         TARGET_CHANNEL
     )
 
@@ -2055,7 +2460,7 @@ async def main():
     )
 
     # ========================================================
-    # 连接 Telegram
+    # Telegram
     # ========================================================
 
     print(
@@ -2102,8 +2507,13 @@ async def main():
             TARGET_CHANNEL
         )
 
+        print_line()
+
         print(
-            "\nTARGET ENTITY:",
+            "TARGET ENTITY:"
+        )
+
+        print(
             target_entity
         )
 
@@ -2125,6 +2535,17 @@ async def main():
             )
         )
 
+        print(
+            "TARGET USERNAME:",
+            getattr(
+                target_entity,
+                "username",
+                None
+            )
+        )
+
+        print_line()
+
     except Exception as e:
 
         print(
@@ -2138,15 +2559,39 @@ async def main():
         raise
 
     # ========================================================
-    # Bot 目标预检查
+    # 初始化 Bot
     # ========================================================
 
     print(
-        "\nℹ️ BOT TARGET PRE-CHECK SKIPPED"
+        "\nINITIALIZING BOT..."
     )
 
-    print(
-        "程序将在实际发布时验证 Bot 权限"
+    try:
+
+        await bot.initialize()
+
+        print(
+            "✅ BOT INITIALIZED"
+        )
+
+    except Exception as e:
+
+        print(
+            "❌ BOT INITIALIZE FAILED"
+        )
+
+        print(
+            f"{type(e).__name__}: {e}"
+        )
+
+        raise
+
+    # ========================================================
+    # Bot 自动诊断
+    # ========================================================
+
+    await diagnose_bot_target(
+        target_entity
     )
 
     # ========================================================
@@ -2278,7 +2723,7 @@ async def main():
                 )
 
             # ------------------------------------------------
-            # 每个组结束立即保存
+            # 每个组结束保存
             # ------------------------------------------------
 
             save_processed(
