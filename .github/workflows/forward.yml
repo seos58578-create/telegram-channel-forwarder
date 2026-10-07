@@ -1,72 +1,47 @@
 name: Telegram Channel Forwarder
 
 on:
-
-  # GitHub Actions 页面手动运行
   workflow_dispatch:
-
-  # 每天北京时间：
-  # 12:00 = UTC 04:00
-  # 16:00 = UTC 08:00
-  # 18:00 = UTC 10:00
-  # 21:36 = UTC 13:36
- # 21:37 = UTC 13:37
   schedule:
-    - cron: "0 4,8,10 * * *"
-    - cron: "36,37 13 * * *"
+    # 北京时间：
+    # 12:00 = UTC 04:00
+    # 16:00 = UTC 08:00
+    # 18:00 = UTC 10:00
+    # 19:00 = UTC 11:00
+    # 20:00 = UTC 12:00
+    - cron: "0 4,8,10,11,12 * * *"
 
+    # 北京时间：
+    # 21:00 = UTC 13:00
+    # 21:36 = UTC 13:36
+    # 21:37 = UTC 13:37
+    - cron: "0,36,37 13 * * *"
 
 permissions:
   contents: write
-
 
 concurrency:
   group: telegram-channel-forwarder
   cancel-in-progress: false
 
-
 jobs:
-
   forward:
-
     runs-on: ubuntu-latest
 
     steps:
-
-      # =====================================================
-      # 1. Checkout
-      # =====================================================
-
       - name: Checkout repository
-
         uses: actions/checkout@v4
-
         with:
           fetch-depth: 0
 
-
-      # =====================================================
-      # 2. Python
-      # =====================================================
-
       - name: Setup Python
-
         uses: actions/setup-python@v5
-
         with:
           python-version: "3.11"
 
-
-      # =====================================================
-      # 3. Tesseract OCR
-      # =====================================================
-
       - name: Install Tesseract OCR
-
         run: |
-
           sudo apt-get update
-
           sudo apt-get install -y \
             tesseract-ocr \
             tesseract-ocr-eng \
@@ -74,82 +49,39 @@ jobs:
             tesseract-ocr-vie \
             tesseract-ocr-por
 
-
-      # =====================================================
-      # 4. 中文水印字体
-      # =====================================================
-
       - name: Install CJK Fonts
-
         run: |
-
           sudo apt-get install -y \
             fonts-noto-cjk
 
-
-      # =====================================================
-      # 5. Python dependencies
-      # =====================================================
-
       - name: Install Python dependencies
-
         run: |
-
           python -m pip install --upgrade pip
-
           python -m pip install \
             -r requirements.txt
 
-
-      # =====================================================
-      # 6. Run
-      # =====================================================
-
       - name: Run Telegram Forwarder
-
         env:
-
           API_ID: ${{ secrets.API_ID }}
-
           API_HASH: ${{ secrets.API_HASH }}
-
           TELEGRAM_SESSION: ${{ secrets.TELEGRAM_SESSION }}
-
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-
           SOURCE_CHANNELS: ${{ secrets.SOURCE_CHANNELS }}
-
           TARGET_CHANNEL: ${{ secrets.TARGET_CHANNEL }}
-
           SCAN_LIMIT: ${{ secrets.SCAN_LIMIT }}
-
         run: |
-
           python main.py
 
-
-      # =====================================================
-      # 7. 保存 processed.json
-      # =====================================================
-
       - name: Commit processed.json
-
         run: |
-
           git config user.name "github-actions[bot]"
-
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add processed.json
 
           if git diff --cached --quiet; then
-
             echo "No changes to processed.json"
-
           else
-
             git commit -m "Update processed messages"
-
             git push
-
           fi
