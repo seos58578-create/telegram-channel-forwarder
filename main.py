@@ -14,6 +14,7 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 
 from telegram import Bot
+from telegram.error import TelegramError
 
 
 # =========================================================
@@ -24,85 +25,39 @@ BEIJING_TZ = timezone(timedelta(hours=8))
 
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
-
-# 普通 Telegram 账号 StringSession
 TELEGRAM_SESSION = os.environ["TELEGRAM_SESSION"]
 
-# Telegram Bot Token
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 
-# 源频道
-# 例如：
-# SOURCE_CHANNELS=channel1,channel2,channel3
 SOURCE_CHANNELS = [
     x.strip()
-    for x in os.environ.get(
-        "SOURCE_CHANNELS",
-        ""
-    ).split(",")
+    for x in os.environ["SOURCE_CHANNELS"].split(",")
     if x.strip()
 ]
 
-# 目标频道
-# 可以填写：
-# abc123
-# @abc123
-# -1001234567890
-TARGET_CHANNEL = os.environ[
-    "TARGET_CHANNEL"
-].strip()
+TARGET_CHANNEL = os.environ["TARGET_CHANNEL"].strip()
 
-# 每个源频道最多扫描多少条
-SCAN_LIMIT = int(
-    os.environ.get(
-        "SCAN_LIMIT",
-        "500"
-    )
-)
+WATERMARK_TEXT = ""
 
-# processed 文件
 PROCESSED_FILE = "processed.json"
 
-# 图片水印
-WATERMARK_TEXT = "85H官方频道"
+# 每个源频道最多检查多少条。
+# 如果设置为空、0 或 unlimited，则当天消息全部扫描。
+SCAN_LIMIT_RAW = os.environ.get("SCAN_LIMIT", "0").strip()
+
+if SCAN_LIMIT_RAW.lower() in ("", "0", "unlimited", "none"):
+    SCAN_LIMIT = None
+else:
+    SCAN_LIMIT = int(SCAN_LIMIT_RAW)
 
 
 # =========================================================
 # 联系方式识别规则
 # =========================================================
-#
-# 重点：
-#
-# 不再识别：
-#
-# ❌ 任意 8 位数字
-# ❌ Telegram 单词
-# ❌ 客服
-# ❌ 联系我
-# ❌ 私聊
-# ❌ 添加好友
-# ❌ 二维码文字
-#
-# 因为 OCR 很容易把普通图片文字识别成这些内容。
-#
-
 
 CONTACT_PATTERNS = [
 
-    # =====================================================
     # Telegram 链接
-    #
-    # 示例：
-    #
-    # https://t.me/username
-    # http://t.me/username
-    # t.me/username
-    # telegram.me/username
-    #
-    # 这是强联系方式
-    # 一次 OCR 命中即可拦截
-    # =====================================================
-
     (
         "TELEGRAM_LINK",
         re.compile(
@@ -114,18 +69,7 @@ CONTACT_PATTERNS = [
         )
     ),
 
-    # =====================================================
     # Telegram 用户名
-    #
-    # 示例：
-    #
-    # @abcde
-    # @username123
-    #
-    # 必须英文开头
-    # 至少 5 个字符
-    # =====================================================
-
     (
         "TELEGRAM_USERNAME",
         re.compile(
@@ -133,18 +77,7 @@ CONTACT_PATTERNS = [
         )
     ),
 
-    # =====================================================
     # WhatsApp
-    #
-    # 示例：
-    #
-    # https://wa.me/84912345678
-    # wa.me/84912345678
-    #
-    # 强联系方式
-    # 一次 OCR 命中即可拦截
-    # =====================================================
-
     (
         "WHATSAPP_LINK",
         re.compile(
@@ -156,20 +89,7 @@ CONTACT_PATTERNS = [
         )
     ),
 
-    # =====================================================
     # 微信
-    #
-    # 这里只识别英文 wechat
-    #
-    # 不直接识别：
-    #
-    # 微信
-    # 客服
-    # 联系
-    #
-    # 防止 OCR 中文误识别
-    # =====================================================
-
     (
         "WECHAT",
         re.compile(
@@ -178,19 +98,7 @@ CONTACT_PATTERNS = [
         )
     ),
 
-    # =====================================================
-    # 中国大陆手机号
-    #
-    # 示例：
-    #
-    # 13812345678
-    # +8613812345678
-    # 8613812345678
-    #
-    # 注意：
-    # 图片 OCR 手机号需要二次确认
-    # =====================================================
-
+    # 中国手机号
     (
         "CN_PHONE",
         re.compile(
@@ -201,19 +109,7 @@ CONTACT_PATTERNS = [
         )
     ),
 
-    # =====================================================
     # 越南手机号
-    #
-    # 示例：
-    #
-    # 0912345678
-    # 0912 345 678
-    # +84912345678
-    # 84912345678
-    #
-    # 图片 OCR 手机号需要二次确认
-    # =====================================================
-
     (
         "VN_PHONE",
         re.compile(
@@ -226,10 +122,6 @@ CONTACT_PATTERNS = [
     ),
 ]
 
-
-# =========================================================
-# 联系方式类型
-# =========================================================
 
 STRONG_CONTACT_TYPES = {
     "TELEGRAM_LINK",
@@ -246,107 +138,40 @@ PHONE_CONTACT_TYPES = {
 
 
 # =========================================================
-# 北京时间
-# =========================================================
-
-def beijing_now():
-
-    return datetime.now(
-        BEIJING_TZ
-    )
-
-
-# =========================================================
-# 判断消息是否为北京时间今天
-# =========================================================
-
-def is_today(message):
-
-    if not message.date:
-        return False
-
-    msg_time = message.date
-
-    # Telethon 通常返回 UTC datetime
-    if msg_time.tzinfo is None:
-
-        msg_time = msg_time.replace(
-            tzinfo=timezone.utc
-        )
-
-    msg_time = msg_time.astimezone(
-        BEIJING_TZ
-    )
-
-    return (
-        msg_time.date()
-        ==
-        beijing_now().date()
-    )
-
-
-# =========================================================
 # processed.json
 # =========================================================
 
 def load_processed():
-
-    if not os.path.exists(
-        PROCESSED_FILE
-    ):
-
+    if not os.path.exists(PROCESSED_FILE):
         return set()
 
     try:
-
-        with open(
-            PROCESSED_FILE,
-            "r",
-            encoding="utf-8"
-        ) as f:
-
+        with open(PROCESSED_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        messages = data.get(
-            "messages",
-            []
-        )
+        messages = data.get("messages", [])
 
-        return set(
-            str(x)
-            for x in messages
-        )
+        if not isinstance(messages, list):
+            return set()
+
+        return set(str(x) for x in messages)
 
     except Exception as e:
-
-        print(
-            "⚠️ processed.json 读取失败:",
-            e
-        )
-
+        print("⚠️ processed.json 读取失败:", e)
         return set()
 
 
-# =========================================================
-# 保存 processed
-# =========================================================
-
-def save_processed(
-    processed
-):
+def save_processed(processed):
+    # 防止文件无限增长
+    latest = list(processed)[-5000:]
 
     data = {
-        "messages": list(
-            processed
-        )[-5000:]
+        "messages": latest
     }
 
-    with open(
-        PROCESSED_FILE,
-        "w",
-        encoding="utf-8"
-    ) as f:
+    temp_file = PROCESSED_FILE + ".tmp"
 
+    with open(temp_file, "w", encoding="utf-8") as f:
         json.dump(
             data,
             f,
@@ -354,887 +179,891 @@ def save_processed(
             indent=2
         )
 
+    os.replace(temp_file, PROCESSED_FILE)
+
+
+# =========================================================
+# 北京时间判断
+# =========================================================
+
+def to_beijing(dt):
+    if dt is None:
+        return None
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    return dt.astimezone(BEIJING_TZ)
+
+
+def is_today(message):
+    if not message.date:
+        return False
+
+    msg_time = to_beijing(message.date)
+    now = datetime.now(BEIJING_TZ)
+
+    return msg_time.date() == now.date()
+
 
 # =========================================================
 # 文本联系方式检测
 # =========================================================
 
-def detect_contact(text):
-
+def detect_text_contact(text):
     if not text:
+        return []
 
-        return None
+    results = []
 
-    text = str(text)
+    for contact_type, pattern in CONTACT_PATTERNS:
+        matches = pattern.findall(text)
 
-    for name, pattern in CONTACT_PATTERNS:
+        if matches:
+            results.append({
+                "type": contact_type,
+                "matches": matches
+            })
 
-        match = pattern.search(
-            text
-        )
+    return results
 
-        if match:
 
-            return {
-                "type": name,
-                "pattern": pattern.pattern,
-                "match": match.group(0)
-            }
-
-    return None
+def text_has_contact(text):
+    return len(detect_text_contact(text)) > 0
 
 
 # =========================================================
-# QR 二维码检测
+# OCR
 # =========================================================
 
-def detect_qr(
-    image_path
-):
+def ocr_image_variants(image_path):
+
+    results = []
 
     try:
+        image = Image.open(image_path).convert("RGB")
 
-        image = cv2.imread(
-            image_path
+        # ORIGINAL
+        results.append(
+            (
+                "ORIGINAL",
+                pytesseract.image_to_string(
+                    image,
+                    lang="eng+chi_sim+vie+por"
+                )
+            )
         )
 
-        if image is None:
+        # GRAYSCALE
+        gray = ImageOps.grayscale(image)
 
-            return False, []
+        results.append(
+            (
+                "GRAYSCALE",
+                pytesseract.image_to_string(
+                    gray,
+                    lang="eng+chi_sim+vie+por"
+                )
+            )
+        )
 
-        detector = cv2.QRCodeDetector()
+        # ENHANCED
+        enhanced = ImageEnhance.Contrast(gray).enhance(2.0)
 
-        detected_data = []
+        results.append(
+            (
+                "ENHANCED",
+                pytesseract.image_to_string(
+                    enhanced,
+                    lang="eng+chi_sim+vie+por"
+                )
+            )
+        )
 
-        # =================================================
-        # 普通 QR 检测
-        # =================================================
+        # THRESHOLD
+        cv_image = cv2.imread(image_path)
 
-        try:
+        if cv_image is not None:
 
-            data, points, _ = (
-                detector.detectAndDecode(
-                    image
+            gray_cv = cv2.cvtColor(
+                cv_image,
+                cv2.COLOR_BGR2GRAY
+            )
+
+            _, threshold = cv2.threshold(
+                gray_cv,
+                150,
+                255,
+                cv2.THRESH_BINARY
+            )
+
+            threshold_pil = Image.fromarray(threshold)
+
+            results.append(
+                (
+                    "THRESHOLD",
+                    pytesseract.image_to_string(
+                        threshold_pil,
+                        lang="eng+chi_sim+vie+por"
+                    )
                 )
             )
 
-            if data:
+    except Exception as e:
+        print("❌ OCR ERROR:", e)
 
-                detected_data.append(
-                    data
-                )
+    return results
 
+
+# =========================================================
+# 图片二维码检测
+# =========================================================
+
+def detect_qr_code(image_path):
+
+    try:
+        image = cv2.imread(image_path)
+
+        if image is None:
+            return False
+
+        detector = cv2.QRCodeDetector()
+
+        # 普通检测
+        try:
+            data, points, _ = detector.detectAndDecode(image)
+
+            if points is not None:
+                if data:
+                    print("🚫 QR CODE FOUND:", data)
+                else:
+                    print("🚫 QR CODE FOUND")
+                return True
         except Exception:
             pass
 
-        # =================================================
-        # 灰度 QR 检测
-        # =================================================
-
+        # 灰度检测
         try:
-
             gray = cv2.cvtColor(
                 image,
                 cv2.COLOR_BGR2GRAY
             )
 
-            data, points, _ = (
-                detector.detectAndDecode(
-                    gray
-                )
-            )
+            data, points, _ = detector.detectAndDecode(gray)
 
-            if data:
-
-                detected_data.append(
-                    data
-                )
+            if points is not None:
+                if data:
+                    print("🚫 QR CODE FOUND:", data)
+                else:
+                    print("🚫 QR CODE FOUND")
+                return True
 
         except Exception:
             pass
 
-        # =================================================
-        # 多二维码检测
-        # =================================================
-
+        # 多二维码
         try:
+            result = detector.detectAndDecodeMulti(image)
 
-            result = (
-                detector.detectAndDecodeMulti(
-                    image
-                )
-            )
+            if result is not None:
 
-            if result and len(result) >= 2:
+                retval = result[0]
 
-                ok = result[0]
-                decoded_info = result[1]
-
-                if (
-                    ok
-                    and decoded_info
-                ):
-
-                    for item in decoded_info:
-
-                        if item:
-
-                            detected_data.append(
-                                item
-                            )
+                if retval:
+                    print("🚫 MULTIPLE QR CODE FOUND")
+                    return True
 
         except Exception:
             pass
 
-        # =================================================
-        # 去重
-        # =================================================
-
-        detected_data = list(
-            dict.fromkeys(
-                x
-                for x in detected_data
-                if x
-            )
-        )
-
-        if detected_data:
-
-            return True, detected_data
-
-        return False, []
-
     except Exception as e:
+        print("⚠️ QR DETECTION ERROR:", e)
 
-        print(
-            "⚠️ QR 检测失败:",
-            e
-        )
-
-        return False, []
-
-
-# =========================================================
-# OCR 多版本识别
-# =========================================================
-
-def run_ocr_variants(
-    image_path
-):
-
-    results = []
-
-    try:
-
-        original = Image.open(
-            image_path
-        ).convert(
-            "RGB"
-        )
-
-    except Exception as e:
-
-        print(
-            "❌ 图片打开失败:",
-            e
-        )
-
-        return results
-
-    # =====================================================
-    # OCR 1：原图
-    # =====================================================
-
-    try:
-
-        text = pytesseract.image_to_string(
-            original,
-            lang="eng+chi_sim+vie"
-        )
-
-        results.append(
-            (
-                "ORIGINAL",
-                text
-            )
-        )
-
-    except Exception as e:
-
-        print(
-            "OCR ORIGINAL ERROR:",
-            e
-        )
-
-    # =====================================================
-    # OCR 2：灰度
-    # =====================================================
-
-    try:
-
-        gray = ImageOps.grayscale(
-            original
-        )
-
-        text = pytesseract.image_to_string(
-            gray,
-            lang="eng+chi_sim+vie"
-        )
-
-        results.append(
-            (
-                "GRAYSCALE",
-                text
-            )
-        )
-
-    except Exception as e:
-
-        print(
-            "OCR GRAYSCALE ERROR:",
-            e
-        )
-
-    # =====================================================
-    # OCR 3：增强
-    # =====================================================
-
-    try:
-
-        enhanced = ImageEnhance.Contrast(
-            original
-        ).enhance(
-            2.0
-        )
-
-        enhanced = ImageEnhance.Sharpness(
-            enhanced
-        ).enhance(
-            2.0
-        )
-
-        text = pytesseract.image_to_string(
-            enhanced,
-            lang="eng+chi_sim+vie"
-        )
-
-        results.append(
-            (
-                "ENHANCED",
-                text
-            )
-        )
-
-    except Exception as e:
-
-        print(
-            "OCR ENHANCED ERROR:",
-            e
-        )
-
-    # =====================================================
-    # OCR 4：阈值
-    # =====================================================
-
-    try:
-
-        gray = ImageOps.grayscale(
-            original
-        )
-
-        threshold = gray.point(
-            lambda p:
-            255 if p > 160 else 0
-        )
-
-        text = pytesseract.image_to_string(
-            threshold,
-            lang="eng+chi_sim+vie"
-        )
-
-        results.append(
-            (
-                "THRESHOLD",
-                text
-            )
-        )
-
-    except Exception as e:
-
-        print(
-            "OCR THRESHOLD ERROR:",
-            e
-        )
-
-    return results
+    return False
 
 
 # =========================================================
 # 图片联系方式检测
 # =========================================================
 
-def detect_image_contact(
-    image_path
-):
+def detect_image_contact(image_path):
 
-    ocr_results = run_ocr_variants(
-        image_path
-    )
+    # -----------------------------------------------------
+    # 第一层：二维码
+    # -----------------------------------------------------
 
-    if not ocr_results:
+    if detect_qr_code(image_path):
 
-        print(
-            "⚠️ OCR 没有返回结果"
-        )
+        return {
+            "found": True,
+            "reason": "QR_CODE"
+        }
 
-        return None
 
-    # =====================================================
-    # 所有检测结果
-    # =====================================================
+    # -----------------------------------------------------
+    # 第二层：OCR
+    # -----------------------------------------------------
+
+    ocr_results = ocr_image_variants(image_path)
 
     detections = {}
 
-    # =====================================================
-    # 遍历 OCR
-    # =====================================================
-
     for pass_name, text in ocr_results:
 
-        print()
-        print(
-            f"OCR {pass_name}:"
-        )
+        if not text:
+            continue
 
-        # 防止日志过长
-        print(
-            repr(
-                text[:2000]
-            )
-        )
+        for contact_type, pattern in CONTACT_PATTERNS:
 
-        result = detect_contact(
-            text
-        )
+            matches = pattern.findall(text)
 
-        if result:
+            if matches:
 
-            contact_type = result[
-                "type"
-            ]
+                if contact_type not in detections:
+                    detections[contact_type] = []
 
-            if (
-                contact_type
-                not in detections
-            ):
-
-                detections[
-                    contact_type
-                ] = []
-
-            detections[
-                contact_type
-            ].append(
-                {
+                detections[contact_type].append({
                     "pass": pass_name,
-                    "match": result[
-                        "match"
-                    ],
-                    "pattern": result[
-                        "pattern"
-                    ]
-                }
-            )
+                    "matches": matches
+                })
 
-            print(
-                "CONTACT DETECTED:",
-                contact_type
-            )
 
+    # -----------------------------------------------------
+    # 强联系方式：
+    # Telegram / WhatsApp / WeChat
+    # 一次识别即可判定
+    # -----------------------------------------------------
+
+    for contact_type in STRONG_CONTACT_TYPES:
+
+        hits = detections.get(contact_type, [])
+
+        if not hits:
+            continue
+
+        print("")
+        print("🚫 IMAGE CONTACT FOUND")
+        print("PATTERN:", contact_type)
+
+        for item in hits:
             print(
+                "OCR PASS:",
+                item["pass"],
                 "MATCH:",
-                repr(
-                    result["match"]
-                )
+                item["matches"]
             )
 
-    # =====================================================
-    # 完全没有联系方式
-    # =====================================================
+        return {
+            "found": True,
+            "reason": contact_type
+        }
 
-    if not detections:
 
-        print()
-        print(
-            "✅ IMAGE OCR: NO CONTACT FOUND"
-        )
+    # -----------------------------------------------------
+    # 手机号：
+    # 至少两个独立 OCR 结果确认
+    # 防止 OCR 把普通数字识别成电话号码
+    # -----------------------------------------------------
 
-        return None
+    for contact_type in PHONE_CONTACT_TYPES:
 
-    # =====================================================
-    # 强联系方式
-    #
-    # Telegram URL
-    # Telegram username
-    # WhatsApp
-    # WeChat
-    #
-    # 一次命中即可
-    # =====================================================
-
-    for contact_type in (
-        STRONG_CONTACT_TYPES
-    ):
-
-        hits = detections.get(
-            contact_type,
-            []
-        )
+        hits = detections.get(contact_type, [])
 
         if not hits:
-
             continue
 
-        hit = hits[0]
-
-        print()
-        print(
-            "========================================"
-        )
-
-        print(
-            "❌ STRONG CONTACT FOUND"
-        )
-
-        print(
-            "PATTERN:",
-            contact_type
-        )
-
-        print(
-            "MATCH:",
-            repr(
-                hit["match"]
-            )
-        )
-
-        print(
-            "OCR PASS:",
-            hit["pass"]
-        )
-
-        print(
-            "ACTION: SKIP IMAGE"
-        )
-
-        print(
-            "========================================"
-        )
-
-        return hit
-
-    # =====================================================
-    # 手机号检测
-    #
-    # 注意：
-    #
-    # 如果只命中一次：
-    #
-    # ❌ 不跳过
-    #
-    # 如果至少两个 OCR 版本命中：
-    #
-    # ✅ 确认联系方式
-    #
-    # 这样可以减少 OCR 乱码误判。
-    # =====================================================
-
-    for contact_type in (
-        PHONE_CONTACT_TYPES
-    ):
-
-        hits = detections.get(
-            contact_type,
-            []
-        )
-
-        # -------------------------------------------------
-        # 这里非常重要
-        #
-        # 如果根本没有命中，
-        # 直接 continue
-        #
-        # 不再出现：
-        #
-        # CN_PHONE
-        # OCR PASS COUNT: 0
-        #
-        # 这种错误日志。
-        # -------------------------------------------------
-
-        if not hits:
-
-            continue
-
-        unique_passes = set(
+        pass_names = set(
             item["pass"]
             for item in hits
         )
 
-        # =================================================
-        # 两次或以上 OCR 命中
-        # =================================================
+        if len(pass_names) >= 2:
 
-        if len(unique_passes) >= 2:
+            print("")
+            print("🚫 IMAGE PHONE CONTACT CONFIRMED")
+            print("PATTERN:", contact_type)
+            print("OCR PASS COUNT:", len(pass_names))
+            print("OCR PASSES:", ", ".join(pass_names))
 
-            hit = hits[0]
-
-            print()
-            print(
-                "========================================"
-            )
-
-            print(
-                "❌ PHONE CONTACT CONFIRMED"
-            )
-
-            print(
-                "PATTERN:",
-                contact_type
-            )
-
-            print(
-                "MATCH:",
-                repr(
-                    hit["match"]
+            for item in hits:
+                print(
+                    "MATCH:",
+                    item["matches"]
                 )
-            )
+
+            return {
+                "found": True,
+                "reason": contact_type
+            }
+
+        else:
+
+            print("")
+            print("⚠️ PHONE OCR HIT BUT NOT CONFIRMED")
+            print("PATTERN:", contact_type)
+
+            for item in hits:
+                print(
+                    "MATCH:",
+                    item["matches"]
+                )
 
             print(
                 "OCR PASS COUNT:",
-                len(unique_passes)
+                len(pass_names)
             )
 
             print(
                 "OCR PASSES:",
-                ", ".join(
-                    sorted(
-                        unique_passes
-                    )
-                )
+                ", ".join(pass_names)
             )
 
             print(
-                "ACTION: SKIP IMAGE"
+                "ACTION: IGNORE FALSE POSITIVE"
             )
 
-            print(
-                "========================================"
-            )
 
-            return hit
+    print("")
+    print("✅ IMAGE OCR: NO CONTACT FOUND")
 
-        # =================================================
-        # 只有一次 OCR 命中
-        #
-        # 不拦截
-        # =================================================
-
-        print()
-        print(
-            "⚠️ PHONE OCR HIT BUT NOT CONFIRMED"
-        )
-
-        print(
-            "PATTERN:",
-            contact_type
-        )
-
-        print(
-            "MATCH:",
-            repr(
-                hits[0]["match"]
-            )
-        )
-
-        print(
-            "OCR PASS COUNT:",
-            len(unique_passes)
-        )
-
-        print(
-            "OCR PASSES:",
-            ", ".join(
-                sorted(
-                    unique_passes
-                )
-            )
-        )
-
-        print(
-            "ACTION: IGNORE FALSE POSITIVE"
-        )
-
-    # =====================================================
-    # 没有确认联系方式
-    # =====================================================
-
-    print()
-    print(
-        "✅ IMAGE CONTACT NOT CONFIRMED"
-    )
-
-    return None
+    return {
+        "found": False,
+        "reason": None
+    }
 
 
 # =========================================================
-# 添加水印
+# 水印字体
+# =========================================================
+
+def get_font(size):
+
+    font_paths = [
+
+        "/usr/share/fonts/opentype/noto/"
+        "NotoSansCJK-Regular.ttc",
+
+        "/usr/share/fonts/opentype/noto/"
+        "NotoSansCJKSC-Regular.otf",
+
+        "/usr/share/fonts/truetype/dejavu/"
+        "DejaVuSans.ttf",
+    ]
+
+    for path in font_paths:
+
+        if os.path.exists(path):
+
+            try:
+                return ImageFont.truetype(
+                    path,
+                    size
+                )
+            except Exception:
+                pass
+
+    return ImageFont.load_default()
+
+
+# =========================================================
+# 图片加水印
 # =========================================================
 
 def add_watermark(
-    input_path,
+    image_path,
     output_path
 ):
 
-    image = Image.open(
-        input_path
-    ).convert(
-        "RGBA"
-    )
-
-    overlay = Image.new(
-        "RGBA",
-        image.size,
-        (0, 0, 0, 0)
-    )
-
-    draw = ImageDraw.Draw(
-        overlay
-    )
-
-    # =====================================================
-    # Noto CJK 字体
-    # =====================================================
-
-    font_path = (
-        "/usr/share/fonts/opentype/"
-        "noto/NotoSansCJK-Regular.ttc"
-    )
-
     try:
 
+        image = Image.open(
+            image_path
+        ).convert("RGBA")
+
+        width, height = image.size
+
+        # 根据图片大小自动计算字体
         font_size = max(
             24,
-            image.width // 30
+            int(min(width, height) * 0.045)
         )
 
-        font = ImageFont.truetype(
-            font_path,
-            font_size
+        font = get_font(font_size)
+
+        # 透明图层
+        overlay = Image.new(
+            "RGBA",
+            image.size,
+            (0, 0, 0, 0)
         )
 
-    except Exception:
-
-        font = ImageFont.load_default()
-
-    # =====================================================
-    # 计算文字尺寸
-    # =====================================================
-
-    bbox = draw.textbbox(
-        (0, 0),
-        WATERMARK_TEXT,
-        font=font
-    )
-
-    text_width = (
-        bbox[2] - bbox[0]
-    )
-
-    text_height = (
-        bbox[3] - bbox[1]
-    )
-
-    margin = max(
-        20,
-        image.width // 50
-    )
-
-    x = (
-        image.width
-        - text_width
-        - margin
-    )
-
-    y = (
-        image.height
-        - text_height
-        - margin
-    )
-
-    padding = 10
-
-    # =====================================================
-    # 半透明背景
-    # =====================================================
-
-    draw.rounded_rectangle(
-        (
-            x - padding,
-            y - padding,
-            x + text_width + padding,
-            y + text_height + padding
-        ),
-        radius=8,
-        fill=(
-            0,
-            0,
-            0,
-            120
+        draw = ImageDraw.Draw(
+            overlay
         )
-    )
 
-    # =====================================================
-    # 水印文字
-    # =====================================================
-
-    draw.text(
-        (x, y),
-        WATERMARK_TEXT,
-        font=font,
-        fill=(
-            255,
-            255,
-            255,
-            220
-        ),
-        stroke_width=2,
-        stroke_fill=(
-            0,
-            0,
-            0,
-            180
+        bbox = draw.textbbox(
+            (0, 0),
+            WATERMARK_TEXT,
+            font=font,
+            stroke_width=2
         )
-    )
 
-    # =====================================================
-    # 合并
-    # =====================================================
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
 
-    result = Image.alpha_composite(
-        image,
-        overlay
-    )
+        margin = max(
+            15,
+            int(min(width, height) * 0.02)
+        )
 
-    result.convert(
-        "RGB"
-    ).save(
-        output_path,
-        quality=95
-    )
+        x = width - text_width - margin
+        y = height - text_height - margin
+
+        # 黑色描边 + 白字
+        draw.text(
+            (x, y),
+            WATERMARK_TEXT,
+            font=font,
+            fill=(255, 255, 255, 210),
+            stroke_width=3,
+            stroke_fill=(0, 0, 0, 180)
+        )
+
+        result = Image.alpha_composite(
+            image,
+            overlay
+        )
+
+        result.convert("RGB").save(
+            output_path,
+            "JPEG",
+            quality=95
+        )
+
+        return True
+
+    except Exception as e:
+
+        print(
+            "❌ WATERMARK ERROR:",
+            e
+        )
+
+        return False
 
 
 # =========================================================
-# Bot 发送文本
+# Telegram Bot
 # =========================================================
 
-async def send_text(
+async def bot_send_text(
     bot,
     target,
     text
 ):
 
     if not text:
+        return False
 
-        return
-
-    # Telegram 普通文本安全限制
+    # Telegram 普通消息限制约 4096 字符
     max_length = 4000
 
-    # =====================================================
-    # 不超过限制
-    # =====================================================
+    chunks = [
+        text[i:i + max_length]
+        for i in range(
+            0,
+            len(text),
+            max_length
+        )
+    ]
 
-    if len(text) <= max_length:
+    try:
 
-        await bot.send_message(
-            chat_id=target,
-            text=text
+        for chunk in chunks:
+
+            await bot.send_message(
+                chat_id=target,
+                text=chunk
+            )
+
+        return True
+
+    except TelegramError as e:
+
+        print(
+            "❌ BOT TEXT ERROR:",
+            e
         )
 
-        return
+        return False
 
-    # =====================================================
-    # 超长拆分
-    # =====================================================
+    except Exception as e:
 
-    for i in range(
-        0,
-        len(text),
-        max_length
-    ):
-
-        chunk = text[
-            i:i + max_length
-        ]
-
-        await bot.send_message(
-            chat_id=target,
-            text=chunk
+        print(
+            "❌ TEXT SEND ERROR:",
+            e
         )
 
-        await asyncio.sleep(
-            0.5
-        )
+        return False
 
 
-# =========================================================
-# Bot 发送图片
-# =========================================================
-
-async def send_photo(
+async def bot_send_photo(
     bot,
     target,
     image_path,
     caption=None
 ):
 
-    # Telegram 图片 Caption 最大约 1024 字符
-    if (
-        caption
-        and len(caption) > 1024
-    ):
+    try:
 
-        # 先发图片
-        with open(
-            image_path,
-            "rb"
-        ) as photo:
+        caption = caption or ""
 
-            await bot.send_photo(
-                chat_id=target,
-                photo=photo
+        # Telegram 图片 caption 最大约 1024 字符
+        if len(caption) <= 1024:
+
+            with open(
+                image_path,
+                "rb"
+            ) as photo:
+
+                await bot.send_photo(
+                    chat_id=target,
+                    photo=photo,
+                    caption=caption
+                )
+
+        else:
+
+            # 图片先发
+            with open(
+                image_path,
+                "rb"
+            ) as photo:
+
+                await bot.send_photo(
+                    chat_id=target,
+                    photo=photo
+                )
+
+            # 长文字单独发送
+            await bot_send_text(
+                bot,
+                target,
+                caption
             )
 
-        # 再发完整文字
-        await send_text(
-            bot,
-            target,
-            caption
+        return True
+
+    except TelegramError as e:
+
+        print(
+            "❌ BOT IMAGE ERROR:",
+            e
         )
 
-    else:
+        return False
 
-        with open(
-            image_path,
-            "rb"
-        ) as photo:
+    except Exception as e:
 
-            await bot.send_photo(
-                chat_id=target,
-                photo=photo,
-                caption=caption or None
+        print(
+            "❌ IMAGE SEND ERROR:",
+            e
+        )
+
+        return False
+
+
+# =========================================================
+# 处理一条消息
+# =========================================================
+
+async def process_message(
+    client,
+    bot,
+    target_entity,
+    source_name,
+    message,
+    processed
+):
+
+    message_key = (
+        f"{source_name}:{message.id}"
+    )
+
+    # -----------------------------------------------------
+    # 已经处理过
+    # -----------------------------------------------------
+
+    if message_key in processed:
+
+        print(
+            f"MESSAGE {message.id} "
+            f"already processed."
+        )
+
+        return
+
+
+    # -----------------------------------------------------
+    # 空消息
+    # -----------------------------------------------------
+
+    text = (
+        message.message
+        or ""
+    ).strip()
+
+    if not message.media and not text:
+
+        print(
+            f"MESSAGE {message.id} "
+            f"empty, skipped."
+        )
+
+        processed.add(
+            message_key
+        )
+
+        return
+
+
+    # -----------------------------------------------------
+    # 消息时间
+    # -----------------------------------------------------
+
+    msg_time = to_beijing(
+        message.date
+    )
+
+    print("")
+    print("=" * 70)
+
+    print(
+        "PROCESS MESSAGE:",
+        message.id
+    )
+
+    print(
+        "SOURCE:",
+        source_name
+    )
+
+    print(
+        "TIME:",
+        msg_time
+    )
+
+    # =====================================================
+    # 文字消息
+    # =====================================================
+
+    if not message.photo:
+
+        if text_has_contact(text):
+
+            print(
+                "🚫 TEXT CONTACT FOUND"
             )
+
+            print(
+                "ACTION: SKIP"
+            )
+
+            processed.add(
+                message_key
+            )
+
+            return
+
+
+        print(
+            "📤 SEND TEXT"
+        )
+
+        success = await bot_send_text(
+            bot,
+            target_entity,
+            text
+        )
+
+        if success:
+
+            print(
+                "✅ TEXT PUBLISHED"
+            )
+
+            processed.add(
+                message_key
+            )
+
+        return
+
+
+    # =====================================================
+    # 图片消息
+    # =====================================================
+
+    print(
+        "🖼 IMAGE MESSAGE"
+    )
+
+    temp_dir = tempfile.mkdtemp(
+        prefix="telegram_forward_"
+    )
+
+    try:
+
+        original_image = os.path.join(
+            temp_dir,
+            "original.jpg"
+        )
+
+        clean_image = os.path.join(
+            temp_dir,
+            "clean.jpg"
+        )
+
+        # -------------------------------------------------
+        # 下载图片
+        # -------------------------------------------------
+
+        print(
+            "⬇️ DOWNLOADING IMAGE..."
+        )
+
+        await client.download_media(
+            message,
+            file=original_image
+        )
+
+        if not os.path.exists(
+            original_image
+        ):
+
+            print(
+                "❌ IMAGE DOWNLOAD FAILED"
+            )
+
+            return
+
+
+        # -------------------------------------------------
+        # 图片 Caption 联系方式检测
+        # -------------------------------------------------
+
+        if text_has_contact(text):
+
+            print(
+                "🚫 IMAGE CAPTION CONTACT FOUND"
+            )
+
+            print(
+                "ACTION: SKIP WHOLE IMAGE"
+            )
+
+            processed.add(
+                message_key
+            )
+
+            return
+
+
+        # -------------------------------------------------
+        # QR + OCR
+        # -------------------------------------------------
+
+        contact_result = (
+            detect_image_contact(
+                original_image
+            )
+        )
+
+        if contact_result["found"]:
+
+            print(
+                "🚫 IMAGE SKIPPED"
+            )
+
+            print(
+                "REASON:",
+                contact_result["reason"]
+            )
+
+            processed.add(
+                message_key
+            )
+
+            return
+
+
+        # -------------------------------------------------
+        # 加水印
+        # -------------------------------------------------
+
+        print(
+            "💧 ADD WATERMARK..."
+        )
+
+        watermark_success = (
+            add_watermark(
+                original_image,
+                clean_image
+            )
+        )
+
+        if not watermark_success:
+
+            print(
+                "❌ WATERMARK FAILED"
+            )
+
+            return
+
+
+        # -------------------------------------------------
+        # Bot 发布
+        # -------------------------------------------------
+
+        print(
+            "📤 SEND IMAGE..."
+        )
+
+        success = await bot_send_photo(
+            bot,
+            target_entity,
+            clean_image,
+            text
+        )
+
+        if success:
+
+            print(
+                "✅ IMAGE PUBLISHED"
+            )
+
+            processed.add(
+                message_key
+            )
+
+        else:
+
+            print(
+                "❌ IMAGE PUBLISH FAILED"
+            )
+
+    except Exception as e:
+
+        print(
+            "❌ IMAGE PROCESS ERROR:",
+            e
+        )
+
+    finally:
+
+        shutil.rmtree(
+            temp_dir,
+            ignore_errors=True
+        )
 
 
 # =========================================================
@@ -1243,22 +1072,18 @@ async def send_photo(
 
 async def main():
 
-    print()
-    print(
-        "=========================================="
-    )
+    print("")
+    print("=" * 70)
+    print("TELEGRAM AUTO FORWARDER")
+    print("=" * 70)
 
-    print(
-        "Telegram Channel Forwarder"
-    )
-
-    print(
-        "=========================================="
+    now = datetime.now(
+        BEIJING_TZ
     )
 
     print(
         "BEIJING TIME:",
-        beijing_now()
+        now
     )
 
     print(
@@ -1276,54 +1101,9 @@ async def main():
         SCAN_LIMIT
     )
 
-    print(
-        "=========================================="
-    )
-
-    # =====================================================
-    # 参数检查
-    # =====================================================
-
-    if not SOURCE_CHANNELS:
-
-        print(
-            "❌ SOURCE_CHANNELS 未配置"
-        )
-
-        return
-
-    if not TARGET_CHANNEL:
-
-        print(
-            "❌ TARGET_CHANNEL 未配置"
-        )
-
-        return
-
-    # =====================================================
-    # 目标频道格式
-    # =====================================================
-
-    target = TARGET_CHANNEL
-
-    # 如果不是数字 ID
-    # 自动添加 @
-    if not target.startswith("@"):
-
-        if not target.lstrip(
-            "-"
-        ).isdigit():
-
-            target = "@" + target
-
-    print(
-        "NORMALIZED TARGET:",
-        target
-    )
-
-    # =====================================================
+    # -----------------------------------------------------
     # processed
-    # =====================================================
+    # -----------------------------------------------------
 
     processed = load_processed()
 
@@ -1332,9 +1112,14 @@ async def main():
         len(processed)
     )
 
-    # =====================================================
-    # 创建普通 Telegram Client
-    # =====================================================
+
+    # -----------------------------------------------------
+    # Telegram 普通账号
+    # -----------------------------------------------------
+
+    print(
+        "CONNECTING TELEGRAM..."
+    )
 
     client = TelegramClient(
         StringSession(
@@ -1344,676 +1129,399 @@ async def main():
         API_HASH
     )
 
-    print()
-    print(
-        "CONNECTING TELEGRAM..."
-    )
-
-    await client.connect()
-
-    # =====================================================
-    # 检查普通账号
-    # =====================================================
-
-    if not await client.is_user_authorized():
-
-        print(
-            "❌ TELEGRAM SESSION 未授权"
-        )
-
-        await client.disconnect()
-
-        return
+    await client.start()
 
     print(
         "✅ TELEGRAM CONNECTED"
     )
 
-    # =====================================================
-    # 创建 Bot
-    # =====================================================
+
+    # -----------------------------------------------------
+    # Bot
+    # -----------------------------------------------------
 
     bot = Bot(
         token=BOT_TOKEN
     )
 
-    # =====================================================
-    # 检查 Bot
-    # =====================================================
-
     try:
 
-        bot_me = await bot.get_me()
-
-        print()
-        print(
-            "BOT USERNAME:",
-            bot_me.username
-        )
+        bot_info = await bot.get_me()
 
         print(
-            "BOT ID:",
-            bot_me.id
+            "BOT:",
+            bot_info.username
         )
 
-    except Exception as e:
+        # -------------------------------------------------
+        # 检查目标频道
+        # -------------------------------------------------
+
+        target_entity = await client.get_entity(
+            TARGET_CHANNEL
+        )
 
         print(
-            "❌ BOT TOKEN ERROR:",
-            e
+            "TARGET ENTITY:",
+            target_entity
         )
 
-        await client.disconnect()
-
-        await bot.shutdown()
-
-        return
-
-    # =====================================================
-    # 检查目标频道
-    # =====================================================
-
-    try:
-
-        target_entity = await bot.get_chat(
-            target
-        )
-
-        print()
         print(
             "TARGET TITLE:",
             getattr(
                 target_entity,
                 "title",
-                None
+                ""
             )
         )
 
         print(
             "TARGET ID:",
-            target_entity.id
-        )
-
-        print(
-            "TARGET TYPE:",
             getattr(
                 target_entity,
-                "type",
-                None
+                "id",
+                ""
             )
         )
 
-    except Exception as e:
-
-        print()
-        print(
-            "❌ TARGET CHANNEL ERROR:"
-        )
-
-        print(
-            repr(e)
-        )
-
-        print()
-        print(
-            "请检查："
-        )
-
-        print(
-            "1. Bot 是否已经加入目标频道"
-        )
-
-        print(
-            "2. Bot 是否是目标频道管理员"
-        )
-
-        print(
-            "3. Bot 是否拥有发布消息权限"
-        )
-
-        print(
-            "4. TARGET_CHANNEL 是否正确"
-        )
-
-        await client.disconnect()
-
-        await bot.shutdown()
-
-        return
-
-    # =====================================================
-    # 遍历源频道
-    # =====================================================
-
-    for source_name in SOURCE_CHANNELS:
-
-        print()
-        print(
-            "=========================================="
-        )
-
-        print(
-            "SOURCE:",
-            source_name
-        )
-
-        print(
-            "=========================================="
-        )
-
-        # =================================================
-        # 获取源频道实体
-        # =================================================
+        # -------------------------------------------------
+        # Bot 获取目标频道
+        # -------------------------------------------------
 
         try:
 
-            source_entity = (
-                await client.get_entity(
-                    source_name
-                )
+            bot_target = await bot.get_chat(
+                chat_id=TARGET_CHANNEL
             )
 
             print(
-                "SOURCE ENTITY:",
-                source_entity
+                "BOT TARGET:",
+                bot_target.title
+            )
+
+            print(
+                "✅ BOT TARGET ACCESS OK"
             )
 
         except Exception as e:
 
-            print()
+            print("")
             print(
-                "❌ SOURCE ENTITY ERROR:",
+                "❌ BOT TARGET ACCESS ERROR"
+            )
+
+            print(
+                str(e)
+            )
+
+            print("")
+            print(
+                "请检查："
+            )
+
+            print(
+                "1. Bot 是否已经加入目标频道"
+            )
+
+            print(
+                "2. Bot 是否设置为管理员"
+            )
+
+            print(
+                "3. 管理员权限是否开启 Post Messages"
+            )
+
+            print("")
+
+            return
+
+
+        # =================================================
+        # 第一步：
+        # 收集所有源频道今天的消息
+        # =================================================
+
+        all_messages = []
+
+        for source_index, source_name in enumerate(
+            SOURCE_CHANNELS
+        ):
+
+            print("")
+            print(
+                "=" * 70
+            )
+
+            print(
+                "SOURCE CHANNEL:",
                 source_name
             )
 
-            print(
-                repr(e)
-            )
+            try:
 
-            continue
+                source_entity = (
+                    await client.get_entity(
+                        source_name
+                    )
+                )
 
-        # =================================================
-        # 扫描消息
-        # =================================================
+                print(
+                    "SOURCE ENTITY:",
+                    source_entity
+                )
 
-        try:
+            except Exception as e:
 
-            messages = client.iter_messages(
+                print(
+                    "❌ SOURCE CHANNEL ERROR:",
+                    source_name,
+                    e
+                )
+
+                continue
+
+
+            count = 0
+
+            # -------------------------------------------------
+            # Telegram 返回顺序是：
+            # 最新 → 最旧
+            #
+            # 我们这里先全部收集
+            # 后面统一排序
+            # -------------------------------------------------
+
+            async for message in client.iter_messages(
                 source_entity,
                 limit=SCAN_LIMIT
-            )
+            ):
 
-            async for message in messages:
+                # 今天
+                if is_today(message):
 
-                # =================================================
-                # 只处理北京时间今天
-                # =================================================
+                    all_messages.append({
+                        "source_name": source_name,
+                        "source_index": source_index,
+                        "message": message
+                    })
 
-                if not is_today(message):
+                    count += 1
 
-                    continue
+                else:
 
-                # =================================================
-                # 消息唯一 ID
-                # =================================================
+                    # 因为 iter_messages 是
+                    # 最新 → 最旧
+                    #
+                    # 一旦发现已经不是今天
+                    # 后面的也不可能是今天
+                    if message.date:
 
-                message_key = (
-                    f"{source_name}:{message.id}"
-                )
-
-                # =================================================
-                # 已处理
-                # =================================================
-
-                if (
-                    message_key
-                    in processed
-                ):
-
-                    print(
-                        f"MESSAGE {message.id} "
-                        f"already processed."
-                    )
-
-                    continue
-
-                # =================================================
-                # 空消息
-                # =================================================
-
-                if (
-                    not message.message
-                    and not message.media
-                ):
-
-                    print(
-                        f"MESSAGE {message.id} "
-                        f"empty, skipped."
-                    )
-
-                    processed.add(
-                        message_key
-                    )
-
-                    continue
-
-                # =================================================
-                # 文本消息
-                # =================================================
-
-                if (
-                    message.message
-                    and not message.photo
-                ):
-
-                    print()
-                    print(
-                        "------------------------------------------"
-                    )
-
-                    print(
-                        f"MESSAGE {message.id} "
-                        f"TEXT"
-                    )
-
-                    # ---------------------------------------------
-                    # 检查文本联系方式
-                    # ---------------------------------------------
-
-                    contact = detect_contact(
-                        message.message
-                    )
-
-                    if contact:
-
-                        print(
-                            "❌ TEXT CONTACT FOUND"
-                        )
-
-                        print(
-                            "PATTERN:",
-                            contact["type"]
-                        )
-
-                        print(
-                            "MATCH:",
-                            repr(
-                                contact["match"]
+                        message_time = (
+                            to_beijing(
+                                message.date
                             )
                         )
 
-                        print(
-                            "ACTION: SKIP TEXT"
-                        )
-
-                        processed.add(
-                            message_key
-                        )
-
-                        continue
-
-                    # ---------------------------------------------
-                    # Bot 发送
-                    # ---------------------------------------------
-
-                    try:
-
-                        await send_text(
-                            bot,
-                            target,
-                            message.message
-                        )
-
-                        print(
-                            "✅ TEXT FORWARDED"
-                        )
-
-                        processed.add(
-                            message_key
-                        )
-
-                    except Exception as e:
-
-                        print()
-                        print(
-                            "❌ TEXT SEND ERROR:"
-                        )
-
-                        print(
-                            repr(e)
-                        )
-
-                    continue
-
-                # =================================================
-                # 图片消息
-                # =================================================
-
-                if message.photo:
-
-                    print()
-                    print(
-                        "------------------------------------------"
-                    )
-
-                    print(
-                        f"MESSAGE {message.id} "
-                        f"IMAGE"
-                    )
-
-                    # ---------------------------------------------
-                    # Caption
-                    # ---------------------------------------------
-
-                    caption = (
-                        message.message
-                        or ""
-                    )
-
-                    # ---------------------------------------------
-                    # Caption 联系方式检测
-                    # ---------------------------------------------
-
-                    caption_contact = detect_contact(
-                        caption
-                    )
-
-                    if caption_contact:
-
-                        print(
-                            "❌ CAPTION CONTACT FOUND"
-                        )
-
-                        print(
-                            "PATTERN:",
-                            caption_contact["type"]
-                        )
-
-                        print(
-                            "MATCH:",
-                            repr(
-                                caption_contact[
-                                    "match"
-                                ]
-                            )
-                        )
-
-                        print(
-                            "ACTION: SKIP IMAGE"
-                        )
-
-                        processed.add(
-                            message_key
-                        )
-
-                        continue
-
-                    # ---------------------------------------------
-                    # 创建临时目录
-                    # ---------------------------------------------
-
-                    temp_dir = tempfile.mkdtemp(
-                        prefix="telegram_forward_"
-                    )
-
-                    try:
-
-                        original_path = os.path.join(
-                            temp_dir,
-                            "original.jpg"
-                        )
-
-                        clean_path = os.path.join(
-                            temp_dir,
-                            "clean.jpg"
-                        )
-
-                        # =========================================
-                        # 下载图片
-                        # =========================================
-
-                        print(
-                            "DOWNLOADING IMAGE..."
-                        )
-
-                        downloaded = (
-                            await client.download_media(
-                                message,
-                                file=original_path
-                            )
-                        )
+                        today = datetime.now(
+                            BEIJING_TZ
+                        ).date()
 
                         if (
-                            not downloaded
-                            or not os.path.exists(
-                                original_path
-                            )
+                            message_time.date()
+                            < today
                         ):
+                            break
 
-                            print(
-                                "❌ IMAGE DOWNLOAD FAILED"
-                            )
-
-                            continue
-
-                        print(
-                            "✅ IMAGE DOWNLOADED"
-                        )
-
-                        # =========================================
-                        # QR 检测
-                        # =========================================
-
-                        qr_found, qr_data = detect_qr(
-                            original_path
-                        )
-
-                        if qr_found:
-
-                            print()
-                            print(
-                                "❌ QR CODE FOUND"
-                            )
-
-                            print(
-                                "QR DATA:",
-                                qr_data
-                            )
-
-                            print(
-                                "ACTION: SKIP IMAGE"
-                            )
-
-                            processed.add(
-                                message_key
-                            )
-
-                            continue
-
-                        print(
-                            "✅ QR CHECK PASSED"
-                        )
-
-                        # =========================================
-                        # OCR 联系方式
-                        # =========================================
-
-                        image_contact = (
-                            detect_image_contact(
-                                original_path
-                            )
-                        )
-
-                        if image_contact:
-
-                            print()
-                            print(
-                                "❌ IMAGE CONTACT FOUND"
-                            )
-
-                            print(
-                                "PATTERN:",
-                                image_contact[
-                                    "type"
-                                ]
-                            )
-
-                            print(
-                                "MATCH:",
-                                repr(
-                                    image_contact[
-                                        "match"
-                                    ]
-                                )
-                            )
-
-                            print(
-                                "ACTION: SKIP IMAGE"
-                            )
-
-                            processed.add(
-                                message_key
-                            )
-
-                            continue
-
-                        # =========================================
-                        # 加水印
-                        # =========================================
-
-                        print()
-                        print(
-                            "ADDING WATERMARK..."
-                        )
-
-                        add_watermark(
-                            original_path,
-                            clean_path
-                        )
-
-                        print(
-                            "✅ WATERMARK ADDED"
-                        )
-
-                        # =========================================
-                        # Bot 上传
-                        # =========================================
-
-                        print(
-                            "UPLOADING IMAGE..."
-                        )
-
-                        await send_photo(
-                            bot,
-                            target,
-                            clean_path,
-                            caption
-                        )
-
-                        print(
-                            "✅ IMAGE FORWARDED"
-                        )
-
-                        # =========================================
-                        # 只有发送成功之后才记录 processed
-                        # =========================================
-
-                        processed.add(
-                            message_key
-                        )
-
-                    except Exception as e:
-
-                        print()
-                        print(
-                            "❌ IMAGE PROCESS ERROR:"
-                        )
-
-                        print(
-                            repr(e)
-                        )
-
-                        print(
-                            "⚠️ 本条消息不会写入 processed.json"
-                        )
-
-                    finally:
-
-                        shutil.rmtree(
-                            temp_dir,
-                            ignore_errors=True
-                        )
-
-                    continue
-
-        except Exception as e:
-
-            print()
-            print(
-                "❌ SOURCE SCAN ERROR:",
-                source_name
-            )
 
             print(
-                repr(e)
+                "TODAY MESSAGES:",
+                count
             )
 
-    # =====================================================
-    # 保存 processed
-    # =====================================================
 
-    save_processed(
-        processed
-    )
+        # =================================================
+        # 第二步：
+        # 全部消息按照原发布时间排序
+        # =================================================
 
-    print()
-    print(
-        "=========================================="
-    )
+        print("")
+        print(
+            "=" * 70
+        )
 
-    print(
-        "FINAL PROCESSED COUNT:",
-        len(processed)
-    )
+        print(
+            "TOTAL TODAY MESSAGES:",
+            len(all_messages)
+        )
 
-    print(
-        "=========================================="
-    )
 
-    # =====================================================
-    # 关闭 Telegram Client
-    # =====================================================
+        def sort_key(item):
 
-    try:
+            message = item["message"]
+
+            message_time = (
+                to_beijing(
+                    message.date
+                )
+            )
+
+            return (
+                message_time,
+                item["source_index"],
+                message.id
+            )
+
+
+        all_messages.sort(
+            key=sort_key
+        )
+
+
+        # =================================================
+        # 输出最终发布顺序
+        # =================================================
+
+        print("")
+        print(
+            "FINAL PUBLISH ORDER:"
+        )
+
+        for index, item in enumerate(
+            all_messages,
+            start=1
+        ):
+
+            message = item["message"]
+
+            print(
+                f"{index}. "
+                f"{item['source_name']} "
+                f"MSG={message.id} "
+                f"TIME={to_beijing(message.date)}"
+            )
+
+
+        # =================================================
+        # 第三步：
+        # 严格按照排序后的顺序逐条发布
+        # =================================================
+
+        print("")
+        print(
+            "=" * 70
+        )
+
+        print(
+            "START PUBLISHING..."
+        )
+
+
+        for index, item in enumerate(
+            all_messages,
+            start=1
+        ):
+
+            source_name = item[
+                "source_name"
+            ]
+
+            message = item[
+                "message"
+            ]
+
+            print("")
+            print(
+                f"[{index}/{len(all_messages)}]"
+            )
+
+            await process_message(
+                client=client,
+                bot=bot,
+                target_entity=TARGET_CHANNEL,
+                source_name=source_name,
+                message=message,
+                processed=processed
+            )
+
+            # -------------------------------------------------
+            # 每处理一条就保存
+            #
+            # GitHub Actions 中途失败时，
+            # 已成功发布的不会再次发布
+            # -------------------------------------------------
+
+            save_processed(
+                processed
+            )
+
+            # -------------------------------------------------
+            # 稍微等待一下
+            # 避免发送过快
+            # -------------------------------------------------
+
+            await asyncio.sleep(1)
+
+
+        # =================================================
+        # 最终保存
+        # =================================================
+
+        save_processed(
+            processed
+        )
+
+        print("")
+        print(
+            "=" * 70
+        )
+
+        print(
+            "✅ ALL DONE"
+        )
+
+        print(
+            "PROCESSED COUNT:",
+            len(processed)
+        )
+
+        print(
+            "=" * 70
+        )
+
+
+    finally:
 
         await client.disconnect()
 
-    except Exception:
-        pass
-
-    # =====================================================
-    # 关闭 Bot
-    # =====================================================
-
-    try:
-
-        await bot.shutdown()
-
-    except Exception:
-        pass
-
-    print()
-    print(
-        "✅ ALL DONE"
-    )
+        try:
+            await bot.shutdown()
+        except Exception:
+            pass
 
 
 # =========================================================
-# 程序入口
+# 启动
 # =========================================================
 
 if __name__ == "__main__":
 
-    asyncio.run(
-        main()
-    )
+    try:
+
+        asyncio.run(
+            main()
+        )
+
+    except KeyboardInterrupt:
+
+        print(
+            "PROGRAM STOPPED"
+        )
+
+    except Exception as e:
+
+        print(
+            "❌ FATAL ERROR:",
+            e
+        )
+
+        raise
