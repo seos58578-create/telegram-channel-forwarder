@@ -2023,7 +2023,7 @@ async def prepare_image(
     success = add_watermark(
         original_path,
         watermark_path,
-        "85H官方频道"
+        ""
     )
 
     if not success:
