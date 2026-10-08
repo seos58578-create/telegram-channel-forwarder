@@ -90,15 +90,9 @@ BEIJING_TZ = timezone(
 
 
 # ============================================================
-# 2. 日志设置
+# 2. 日志
 # ============================================================
 
-# Telethon 默认 INFO 日志非常多，
-# 会不断输出：
-# Starting direct file download...
-# Got difference...
-#
-# 这里改成 WARNING，真正的错误仍然会显示。
 logging.basicConfig(
     level=logging.WARNING,
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -126,22 +120,13 @@ logging.getLogger(
 
 
 # ============================================================
-# 3. OCR 配置
+# 3. OCR
 # ============================================================
 
 OCR_LANG = (
     "eng+chi_sim+vie+por"
 )
 
-# 优化：
-# 原来最多 15 次 OCR
-#
-# 现在默认只做 3 次：
-# ORIGINAL
-# ENHANCED
-# THRESHOLD
-#
-# 一旦发现强联系方式，立即停止。
 OCR_CONFIGS = [
     "--psm 6",
     "--psm 11",
@@ -149,7 +134,7 @@ OCR_CONFIGS = [
 
 
 # ============================================================
-# 4. 联系方式识别
+# 4. 联系方式规则
 # ============================================================
 
 CONTACT_PATTERNS = [
@@ -269,7 +254,7 @@ def now_beijing():
 
 
 # ============================================================
-# 7. 频道名称标准化
+# 7. 频道名称处理
 # ============================================================
 
 def normalize_channel(value):
@@ -388,24 +373,8 @@ def save_processed(
         for x in processed
     }
 
-    def sort_key(value):
-
-        try:
-            return (
-                0,
-                int(value)
-            )
-
-        except Exception:
-
-            return (
-                1,
-                str(value)
-            )
-
     sorted_messages = sorted(
-        normalized,
-        key=sort_key,
+        normalized
     )
 
     data = {
@@ -453,15 +422,15 @@ def is_already_processed(
     message_id,
 ):
 
-    new_key = message_key(
+    key = message_key(
         source_index,
         message_id,
     )
 
-    if new_key in processed:
+    if key in processed:
         return True
 
-    # 兼容以前版本只保存 message_id
+    # 兼容旧版本
     if str(message_id) in processed:
         return True
 
@@ -531,7 +500,7 @@ def format_contacts(
 
 
 # ============================================================
-# 10. 二维码检测
+# 10. 二维码
 # ============================================================
 
 def detect_qr(image):
@@ -544,9 +513,6 @@ def detect_qr(image):
 
         width, height = img.size
 
-        # 优化：
-        # QR 检测不需要无限大图片。
-        # 最大边控制在 1800。
         max_side = max(
             width,
             height,
@@ -639,7 +605,7 @@ def detect_qr(image):
 
 
 # ============================================================
-# 11. OCR 图片预处理
+# 11. OCR 图片
 # ============================================================
 
 def prepare_ocr_images(
@@ -656,13 +622,12 @@ def prepare_ocr_images(
 
         width, height = img.size
 
-        # OCR 不需要原始超大图片。
-        # 最大边限制在 1800。
         max_side = max(
             width,
             height,
         )
 
+        # OCR 最大边限制 1800
         if max_side > 1800:
 
             scale = (
@@ -678,7 +643,7 @@ def prepare_ocr_images(
                 Image.Resampling.LANCZOS,
             )
 
-        # ORIGINAL
+        # 原图
         result.append(
             (
                 "ORIGINAL",
@@ -686,7 +651,7 @@ def prepare_ocr_images(
             )
         )
 
-        # ENHANCED
+        # 灰度 + 增强
         gray = ImageOps.grayscale(
             img
         )
@@ -710,7 +675,7 @@ def prepare_ocr_images(
             )
         )
 
-        # THRESHOLD
+        # 二值化
         threshold = enhanced.point(
             lambda p:
                 255
@@ -734,17 +699,11 @@ def prepare_ocr_images(
     return result
 
 
-# ============================================================
-# 12. OCR
-# ============================================================
-
 def ocr_image(
     image
 ):
 
     all_text = []
-
-    strong_contacts = []
 
     phone_hits = 0
 
@@ -753,18 +712,6 @@ def ocr_image(
             image
         )
     )
-
-    # --------------------------------------------------------
-    # OCR 最多：
-    #
-    # 3 个图片版本
-    # ×
-    # 2 个 PSM
-    #
-    # = 6 次
-    #
-    # 发现强联系方式立即停止。
-    # --------------------------------------------------------
 
     for (
         variant_name,
@@ -813,18 +760,14 @@ def ocr_image(
 
             if strong:
 
-                strong_contacts.extend(
-                    strong
-                )
-
                 return (
                     "\n".join(
                         all_text
                     ),
-                    strong_contacts,
+                    strong,
                 )
 
-            # 电话
+            # 手机号
             phone_contacts = [
                 x
                 for x in contacts
@@ -836,18 +779,20 @@ def ocr_image(
 
                 phone_hits += 1
 
-                # 两次 OCR 都识别到手机号
-                # 才认为可靠
+                # 两次 OCR 识别到手机号
+                # 才判定为联系方式
                 if phone_hits >= 2:
 
-                    return (
+                    combined = (
                         "\n".join(
                             all_text
-                        ),
+                        )
+                    )
+
+                    return (
+                        combined,
                         detect_contacts(
-                            "\n".join(
-                                all_text
-                            )
+                            combined
                         ),
                     )
 
@@ -860,17 +805,14 @@ def ocr_image(
 
 
 # ============================================================
-# 13. 图片总检测
+# 12. 图片检测
 # ============================================================
 
 def inspect_image(
     image
 ):
 
-    # --------------------------------------------------------
     # 第一层：二维码
-    # --------------------------------------------------------
-
     if detect_qr(image):
 
         return {
@@ -880,10 +822,7 @@ def inspect_image(
             "contacts": [],
         }
 
-    # --------------------------------------------------------
     # 第二层：OCR
-    # --------------------------------------------------------
-
     ocr_text, contacts = (
         ocr_image(
             image
@@ -912,7 +851,7 @@ def inspect_image(
 
 
 # ============================================================
-# 14. 水印
+# 13. 水印
 # ============================================================
 
 def find_font():
@@ -996,7 +935,7 @@ def add_watermark(
                 ImageFont.load_default()
             )
 
-        text = "85H官方频道"
+        text = ""
 
         bbox = draw.textbbox(
             (0, 0),
@@ -1103,7 +1042,7 @@ def image_to_bytes(
 
 
 # ============================================================
-# 15. Telegram 连接
+# 14. Telegram 登录
 # ============================================================
 
 async def connect_telegram():
@@ -1177,7 +1116,7 @@ async def connect_telegram():
 
 
 # ============================================================
-# 16. 目标频道
+# 15. 目标频道
 # ============================================================
 
 async def resolve_target_entity():
@@ -1187,7 +1126,10 @@ async def resolve_target_entity():
     )
 
     print()
-    print("=" * 70)
+    print(
+        "=" * 70
+    )
+
     print(
         "TARGET ENTITY:"
     )
@@ -1233,13 +1175,15 @@ async def resolve_target_entity():
         f"{('@' + username) if username else None}"
     )
 
-    print("=" * 70)
+    print(
+        "=" * 70
+    )
 
     return entity
 
 
 # ============================================================
-# 17. Bot 诊断
+# 16. Bot 诊断
 # ============================================================
 
 async def diagnose_bot_target(
@@ -1250,11 +1194,17 @@ async def diagnose_bot_target(
     global BOT_TARGET_CHANNEL
 
     print()
-    print("=" * 70)
+    print(
+        "=" * 70
+    )
+
     print(
         "INITIALIZING BOT..."
     )
-    print("=" * 70)
+
+    print(
+        "=" * 70
+    )
 
     bot = Bot(
         token=BOT_TOKEN
@@ -1266,14 +1216,20 @@ async def diagnose_bot_target(
         "✅ BOT INITIALIZED"
     )
 
-    print("=" * 70)
+    print(
+        "=" * 70
+    )
+
     print(
         "🤖 BOT TARGET DIAGNOSTIC"
     )
-    print("=" * 70)
+
+    print(
+        "=" * 70
+    )
 
     # --------------------------------------------------------
-    # 1 Token
+    # 1
     # --------------------------------------------------------
 
     print()
@@ -1320,7 +1276,7 @@ async def diagnose_bot_target(
         )
 
     # --------------------------------------------------------
-    # 2 Telethon target
+    # 2
     # --------------------------------------------------------
 
     print()
@@ -1361,7 +1317,7 @@ async def diagnose_bot_target(
     )
 
     # --------------------------------------------------------
-    # 3 Bot target
+    # 3
     # --------------------------------------------------------
 
     print()
@@ -1406,7 +1362,7 @@ async def diagnose_bot_target(
         )
 
     # --------------------------------------------------------
-    # 4 Bot getChat
+    # 4
     # --------------------------------------------------------
 
     print()
@@ -1460,7 +1416,7 @@ async def diagnose_bot_target(
         )
 
     # --------------------------------------------------------
-    # 5 Bot membership
+    # 5
     # --------------------------------------------------------
 
     print()
@@ -1563,10 +1519,6 @@ async def diagnose_bot_target(
         else:
 
             print(
-                "   ⚠️ 无法确认 Bot 成员状态"
-            )
-
-            print(
                 "   ⚠️ 跳过成员检查，继续执行"
             )
 
@@ -1598,11 +1550,13 @@ async def diagnose_bot_target(
         "   ⚠️ 实际发送结果将最终确认 Bot 发布权限"
     )
 
-    print("=" * 70)
+    print(
+        "=" * 70
+    )
 
 
 # ============================================================
-# 18. 图片下载
+# 17. 下载图片
 # ============================================================
 
 async def download_message_image(
@@ -1652,7 +1606,7 @@ async def download_message_image(
 
 
 # ============================================================
-# 19. Bot 发送文字
+# 18. Bot 发送文字
 # ============================================================
 
 async def bot_send_text(
@@ -1705,7 +1659,7 @@ async def bot_send_text(
 
 
 # ============================================================
-# 20. Bot 发送单图
+# 19. Bot 单图
 # ============================================================
 
 async def bot_send_photo(
@@ -1721,11 +1675,16 @@ async def bot_send_photo(
 
         try:
 
+            # 每次重试都创建新的 BytesIO
+            image_stream = io.BytesIO(
+                image_bytes
+            )
+
+            image_stream.seek(0)
+
             photo_file = InputFile(
-                io.BytesIO(
-                    image_bytes
-                ),
-                filename="85h.jpg",
+                image_stream,
+                filename="gjp_single.jpg",
             )
 
             await bot.send_photo(
@@ -1766,7 +1725,25 @@ async def bot_send_photo(
 
 
 # ============================================================
-# 21. Bot 发送相册
+# 20. Bot 相册
+# ============================================================
+#
+# 这里是本次重点修复部分。
+#
+# 原问题：
+#
+#   Can't parse inputmedia: media not found
+#
+# 主要原因是 multipart media 处理时，
+# 内存文件没有使用明确、独立的媒体引用。
+#
+# 现在：
+#
+#   1. 每张图片创建独立 BytesIO
+#   2. 每张图片唯一 filename
+#   3. 每次重试重新创建 media
+#   4. 每 10 张拆分
+#
 # ============================================================
 
 async def bot_send_album(
@@ -1778,7 +1755,7 @@ async def bot_send_album(
 
         return False
 
-    # Telegram Bot API 一组最多 10 张
+    # Telegram MediaGroup 最大 10 张
     chunks = [
         items[i:i + 10]
         for i in range(
@@ -1811,24 +1788,57 @@ async def bot_send_album(
 
                 media = []
 
-                for item in chunk:
+                # ------------------------------------------------
+                # 每一次重试都重新创建整个 media 数组
+                # ------------------------------------------------
 
-                    photo = InputFile(
+                for image_index, item in enumerate(
+                    chunk,
+                    start=1,
+                ):
+
+                    image_bytes = item[
+                        "image_bytes"
+                    ]
+
+                    if not image_bytes:
+
+                        raise RuntimeError(
+                            f"相册第 "
+                            f"{image_index} 张图片为空"
+                        )
+
+                    # 独立 BytesIO
+                    image_stream = (
                         io.BytesIO(
-                            item[
-                                "image_bytes"
-                            ]
-                        ),
-                        filename="85h.jpg",
+                            image_bytes
+                        )
+                    )
+
+                    image_stream.seek(0)
+
+                    # 每张图片独立文件名
+                    filename = (
+                        f"gjp_album_"
+                        f"{chunk_index}_"
+                        f"{image_index}_"
+                        f"{item.get('message_id', image_index)}.jpg"
+                    )
+
+                    photo_file = InputFile(
+                        image_stream,
+                        filename=filename,
                     )
 
                     caption = item.get(
                         "caption"
                     )
 
-                    media.append(
+                    # Telegram 相册：
+                    # caption 只给有内容的图片
+                    media_item = (
                         InputMediaPhoto(
-                            media=photo,
+                            media=photo_file,
                             caption=(
                                 caption[:1024]
                                 if caption
@@ -1836,6 +1846,30 @@ async def bot_send_album(
                             ),
                         )
                     )
+
+                    media.append(
+                        media_item
+                    )
+
+                # ------------------------------------------------
+                # 必须确保 1~10 张
+                # ------------------------------------------------
+
+                if not media:
+
+                    raise RuntimeError(
+                        "相册 media 为空"
+                    )
+
+                if len(media) > 10:
+
+                    raise RuntimeError(
+                        "单个 Telegram 相册超过 10 张"
+                    )
+
+                # ------------------------------------------------
+                # 发送
+                # ------------------------------------------------
 
                 await bot.send_media_group(
                     chat_id=BOT_TARGET_CHANNEL,
@@ -1855,6 +1889,7 @@ async def bot_send_album(
                 print(
                     f"   ⚠️ BOT ALBUM RETRY "
                     f"{attempt}/{retries}: "
+                    f"{type(e).__name__}: "
                     f"{e}"
                 )
 
@@ -1876,18 +1911,12 @@ async def bot_send_album(
 
 
 # ============================================================
-# 22. 单张图片处理
+# 21. 单图处理
 # ============================================================
 
 async def process_image_message(
     message
 ):
-
-    # --------------------------------------------------------
-    # Caption 先检查
-    #
-    # 发现联系方式就完全不用下载图片。
-    # --------------------------------------------------------
 
     caption = (
         message.message
@@ -1898,6 +1927,10 @@ async def process_image_message(
         )
         else ""
     )
+
+    # --------------------------------------------------------
+    # Caption 先检测
+    # --------------------------------------------------------
 
     if caption:
 
@@ -1946,7 +1979,7 @@ async def process_image_message(
         }
 
     # --------------------------------------------------------
-    # 图片检测
+    # 二维码 + OCR
     # --------------------------------------------------------
 
     inspection = (
@@ -1984,7 +2017,7 @@ async def process_image_message(
         }
 
     # --------------------------------------------------------
-    # 水印
+    # 加水印
     # --------------------------------------------------------
 
     watermarked = (
@@ -2009,7 +2042,7 @@ async def process_image_message(
 
 
 # ============================================================
-# 23. 获取当天消息
+# 22. 获取北京时间当天消息
 # ============================================================
 
 async def collect_today_messages():
@@ -2039,11 +2072,17 @@ async def collect_today_messages():
     )
 
     print()
-    print("=" * 70)
+    print(
+        "=" * 70
+    )
+
     print(
         "📥 COLLECTING TODAY'S MESSAGES"
     )
-    print("=" * 70)
+
+    print(
+        "=" * 70
+    )
 
     print(
         f"BEIJING DATE: "
@@ -2123,11 +2162,7 @@ async def collect_today_messages():
                     )
                 )
 
-                # Telegram 新 -> 旧
-                #
-                # 已经早于今天，
-                # 后面全部更早，
-                # 可以直接停止。
+                # 已经到昨天
                 if (
                     beijing_date
                     < today_start
@@ -2177,7 +2212,7 @@ async def collect_today_messages():
             )
 
     # --------------------------------------------------------
-    # 跨频道按照真实发布时间排序
+    # 排序
     # --------------------------------------------------------
 
     all_messages.sort(
@@ -2198,7 +2233,7 @@ async def collect_today_messages():
 
 
 # ============================================================
-# 24. 普通消息
+# 23. 普通消息处理
 # ============================================================
 
 async def process_normal_message(
@@ -2224,10 +2259,7 @@ async def process_normal_message(
     )
 
     # --------------------------------------------------------
-    # 已处理直接跳过
-    #
-    # 非常重要：
-    # 已处理图片不会再次下载。
+    # 去重
     # --------------------------------------------------------
 
     if is_already_processed(
@@ -2235,6 +2267,12 @@ async def process_normal_message(
         source_index,
         message.id,
     ):
+
+        print(
+            f"⏭️ SKIP PROCESSED "
+            f"[{source}] "
+            f"message={message.id}"
+        )
 
         return False
 
@@ -2273,10 +2311,6 @@ async def process_normal_message(
                 key
             )
 
-            print(
-                "   ✅ FILTERED"
-            )
-
             return True
 
         if result["status"] != "ready":
@@ -2313,7 +2347,7 @@ async def process_normal_message(
         return False
 
     # --------------------------------------------------------
-    # 普通文字
+    # 文字
     # --------------------------------------------------------
 
     if text:
@@ -2370,7 +2404,7 @@ async def process_normal_message(
         return False
 
     # --------------------------------------------------------
-    # 其他消息
+    # 其他
     # --------------------------------------------------------
 
     print()
@@ -2388,7 +2422,7 @@ async def process_normal_message(
 
 
 # ============================================================
-# 25. 相册处理
+# 24. 相册处理
 # ============================================================
 
 async def process_albums(
@@ -2397,14 +2431,21 @@ async def process_albums(
 ):
 
     if not album_groups:
+
         return
 
     print()
-    print("=" * 70)
+    print(
+        "=" * 70
+    )
+
     print(
         "📚 PROCESSING TELEGRAM ALBUMS"
     )
-    print("=" * 70)
+
+    print(
+        "=" * 70
+    )
 
     for (
         album_key,
@@ -2449,7 +2490,10 @@ async def process_albums(
                 message.id,
             )
 
+            # ------------------------------------------------
             # 已处理
+            # ------------------------------------------------
+
             if is_already_processed(
                 processed,
                 source_index,
@@ -2463,11 +2507,19 @@ async def process_albums(
 
                 continue
 
+            # ------------------------------------------------
+            # 图片独立检测
+            # ------------------------------------------------
+
             result = (
                 await process_image_message(
                     message
                 )
             )
+
+            # ------------------------------------------------
+            # 联系方式 / QR
+            # ------------------------------------------------
 
             if (
                 result["status"]
@@ -2485,6 +2537,10 @@ async def process_albums(
 
                 continue
 
+            # ------------------------------------------------
+            # 下载/处理失败
+            # ------------------------------------------------
+
             if (
                 result["status"]
                 != "ready"
@@ -2496,6 +2552,10 @@ async def process_albums(
                 )
 
                 continue
+
+            # ------------------------------------------------
+            # 合格
+            # ------------------------------------------------
 
             valid_items.append(
                 {
@@ -2517,6 +2577,10 @@ async def process_albums(
                 }
             )
 
+        # ----------------------------------------------------
+        # 全部被过滤
+        # ----------------------------------------------------
+
         if not valid_items:
 
             print(
@@ -2526,7 +2590,7 @@ async def process_albums(
             continue
 
         # ----------------------------------------------------
-        # 发布相册
+        # 发送相册
         # ----------------------------------------------------
 
         success = (
@@ -2534,6 +2598,10 @@ async def process_albums(
                 valid_items
             )
         )
+
+        # ----------------------------------------------------
+        # 成功才写入 processed
+        # ----------------------------------------------------
 
         if success:
 
@@ -2554,12 +2622,13 @@ async def process_albums(
                 "   ❌ ALBUM PUBLISH FAILED"
             )
 
-            # 发布失败不标记
-            # 下次继续尝试
+            print(
+                "   ⚠️ 本次不会写入 processed.json"
+            )
 
 
 # ============================================================
-# 26. 处理全部消息
+# 25. 全部消息处理
 # ============================================================
 
 async def process_messages(
@@ -2568,11 +2637,17 @@ async def process_messages(
 ):
 
     print()
-    print("=" * 70)
+    print(
+        "=" * 70
+    )
+
     print(
         "🔄 PROCESSING MESSAGES"
     )
-    print("=" * 70)
+
+    print(
+        "=" * 70
+    )
 
     album_groups = (
         defaultdict(list)
@@ -2581,7 +2656,7 @@ async def process_messages(
     normal_messages = []
 
     # --------------------------------------------------------
-    # 相册分组
+    # 分离相册
     # --------------------------------------------------------
 
     for item in all_messages:
@@ -2626,7 +2701,20 @@ async def process_messages(
     # 普通消息
     # --------------------------------------------------------
 
-    for item in normal_messages:
+    total_normal = len(
+        normal_messages
+    )
+
+    for index, item in enumerate(
+        normal_messages,
+        start=1,
+    ):
+
+        print()
+        print(
+            f"📊 NORMAL "
+            f"{index}/{total_normal}"
+        )
 
         try:
 
@@ -2664,18 +2752,24 @@ async def process_messages(
 
 
 # ============================================================
-# 27. 主程序
+# 26. 主程序
 # ============================================================
 
 async def main():
 
     global bot
 
-    print("=" * 70)
+    print(
+        "=" * 70
+    )
+
     print(
         "TELEGRAM AUTO FORWARDER"
     )
-    print("=" * 70)
+
+    print(
+        "=" * 70
+    )
 
     print(
         f"BEIJING TIME: "
@@ -2706,6 +2800,10 @@ async def main():
         f"{SCAN_LIMIT}"
     )
 
+    # --------------------------------------------------------
+    # processed
+    # --------------------------------------------------------
+
     processed = load_processed()
 
     print(
@@ -2714,7 +2812,7 @@ async def main():
     )
 
     # --------------------------------------------------------
-    # Telegram User
+    # Telegram
     # --------------------------------------------------------
 
     await connect_telegram()
@@ -2761,11 +2859,17 @@ async def main():
     )
 
     print()
-    print("=" * 70)
+    print(
+        "=" * 70
+    )
+
     print(
         "✅ ALL TASKS COMPLETED"
     )
-    print("=" * 70)
+
+    print(
+        "=" * 70
+    )
 
     print(
         f"PROCESSED COUNT: "
@@ -2777,11 +2881,13 @@ async def main():
         f"{now_beijing()}"
     )
 
-    print("=" * 70)
+    print(
+        "=" * 70
+    )
 
 
 # ============================================================
-# 28. 清理
+# 27. 清理
 # ============================================================
 
 async def cleanup():
@@ -2811,7 +2917,7 @@ async def cleanup():
 
 
 # ============================================================
-# 29. 程序入口
+# 28. 程序入口
 # ============================================================
 
 if __name__ == "__main__":
@@ -2841,17 +2947,25 @@ if __name__ == "__main__":
     except Exception as e:
 
         print()
-        print("=" * 70)
+        print(
+            "=" * 70
+        )
+
         print(
             "❌ FATAL ERROR"
         )
-        print("=" * 70)
+
+        print(
+            "=" * 70
+        )
 
         print(
             f"{type(e).__name__}: "
             f"{e}"
         )
 
-        print("=" * 70)
+        print(
+            "=" * 70
+        )
 
         raise
