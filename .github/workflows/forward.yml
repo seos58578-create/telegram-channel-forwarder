@@ -1,21 +1,13 @@
-```yaml
 name: Telegram Channel Forwarder
 
 on:
   workflow_dispatch:
   schedule:
-    # 北京时间 11:47 = UTC 03:47
-    # 北京时间 15:47 = UTC 07:47
-    # 北京时间 17:47 = UTC 09:47
-    # 北京时间 18:47 = UTC 10:47
-    # 北京时间 19:47 = UTC 11:47
+    # 北京时间 11:47、15:47、17:47、18:47、19:47
     - cron: '47 3,7,9,10,11 * * *'
-
-    # 北京时间 20:47 = UTC 12:47
+    # 北京时间 20:47
     - cron: '47 12 * * *'
-
-    # 北京时间 21:23 = UTC 13:23
-    # 北京时间 21:24 = UTC 13:24
+    # 北京时间 21:23、21:24
     - cron: '23,24 13 * * *'
 
 permissions:
@@ -84,4 +76,3 @@ jobs:
             git commit -m "Update processed messages"
             git push
           fi
-```
