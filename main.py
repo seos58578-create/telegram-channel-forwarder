@@ -44,7 +44,7 @@ SCAN_LIMIT = int(os.environ.get("SCAN_LIMIT", "0"))
 
 PROCESSED_FILE = Path("processed.json")
 
-WATERMARK_TEXT = "85H官方频道"
+WATERMARK_TEXT = ""
 
 OCR_LANG = "eng+chi_sim+vie+por"
 
