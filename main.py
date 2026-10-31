@@ -18,7 +18,6 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
 from telethon import TelegramClient, utils
 from telethon.sessions import StringSession
 from telegram import Bot, InputFile
-from telegram.error import TelegramError
 
 
 # ============================================================
@@ -39,19 +38,17 @@ SOURCE_CHANNELS = [
 ]
 
 TARGET_CHANNEL = os.environ["TARGET_CHANNEL"].strip()
-
 SCAN_LIMIT = int(os.environ.get("SCAN_LIMIT", "0"))
 
 PROCESSED_FILE = Path("processed.json")
-
 WATERMARK_TEXT = ""
 
+# OCR 语言包需要在 GitHub Actions 环境中安装
 OCR_LANG = "eng+chi_sim+vie+por"
 
 MAX_RETRIES = 3
 RETRY_DELAY = 3
 
-# 图片压缩设置
 MAX_IMAGE_SIDE = 2000
 JPEG_QUALITY = 88
 
@@ -72,10 +69,24 @@ for logger_name in [
 
 
 # ============================================================
-# 2. 联系方式检测规则
+# 2. 联系方式及网址检测规则
 # ============================================================
 
 CONTACT_PATTERNS = [
+    # 普通网址、域名、带路径的网址。放在前面，优先识别。
+    (
+        "URL",
+        re.compile(
+            r"(?i)(?:"
+            r"(?:https?://|ftp://|www\.)[^\s<>\"']+"
+            r"|"
+            r"(?<![@\w.-])"
+            r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+            r"[a-z]{2,}"
+            r"(?:/[^\s<>\"']*)?"
+            r")"
+        ),
+    ),
     (
         "TELEGRAM_LINK",
         re.compile(
@@ -122,6 +133,7 @@ CONTACT_PATTERNS = [
 ]
 
 STRONG_CONTACT_TYPES = {
+    "URL",
     "TELEGRAM_LINK",
     "TELEGRAM_USERNAME",
     "WHATSAPP_LINK",
@@ -137,7 +149,7 @@ PHONE_CONTACT_TYPES = {
 
 
 def detect_text_contact(text):
-    """检测文字中的联系方式。"""
+    """检测文字、图片说明中的网址和联系方式。"""
     if not text:
         return None
 
@@ -157,10 +169,7 @@ def load_processed():
         return set()
 
     try:
-        data = json.loads(
-            PROCESSED_FILE.read_text(encoding="utf-8")
-        )
-
+        data = json.loads(PROCESSED_FILE.read_text(encoding="utf-8"))
         messages = data.get("messages", [])
 
         if isinstance(messages, dict):
@@ -184,12 +193,10 @@ def save_processed():
     }
 
     temp_file = PROCESSED_FILE.with_suffix(".json.tmp")
-
     temp_file.write_text(
         json.dumps(data, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-
     temp_file.replace(PROCESSED_FILE)
 
 
@@ -198,9 +205,6 @@ def message_key(source_id, message_id):
 
 
 def is_processed(source_id, message_id):
-    """
-    兼容当前格式和常见的旧版单消息 ID 格式。
-    """
     return (
         message_key(source_id, message_id) in PROCESSED
         or str(message_id) in PROCESSED
@@ -217,10 +221,7 @@ def mark_processed(source_id, message_id):
 
 async def download_image(client, message):
     try:
-        data = await client.download_media(
-            message,
-            file=bytes,
-        )
+        data = await client.download_media(message, file=bytes)
 
         if not data:
             print(f"   ❌ 图片下载失败 message={message.id}")
@@ -229,9 +230,7 @@ async def download_image(client, message):
         return data
 
     except Exception as exc:
-        print(
-            f"   ❌ 图片下载异常 message={message.id}: {exc}"
-        )
+        print(f"   ❌ 图片下载异常 message={message.id}: {exc}")
         return None
 
 
@@ -248,36 +247,22 @@ def detect_qr_code(image_bytes):
     """
     try:
         image = image_from_bytes(image_bytes)
-
-        image_array = cv2.cvtColor(
-            np.array(image),
-            cv2.COLOR_RGB2BGR,
-        )
-
+        image_array = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
         detector = cv2.QRCodeDetector()
 
         try:
-            detected, decoded_info, points, _ = (
-                detector.detectAndDecodeMulti(image_array)
+            detected, decoded_info, points, _ = detector.detectAndDecodeMulti(
+                image_array
             )
-
             if detected and points is not None:
                 return True
-
         except Exception:
             pass
 
         try:
-            decoded, points, _ = detector.detectAndDecode(
-                image_array
-            )
-
-            if points is not None:
+            decoded, points, _ = detector.detectAndDecode(image_array)
+            if points is not None or decoded:
                 return True
-
-            if decoded:
-                return True
-
         except Exception:
             pass
 
@@ -289,19 +274,15 @@ def detect_qr_code(image_bytes):
 
 
 # ============================================================
-# 5. OCR 联系方式检测
+# 5. OCR 网址及联系方式检测
 # ============================================================
 
 def build_ocr_images(image):
-    """生成少量 OCR 变体，提高识别率并控制运行时间。"""
+    """生成 OCR 变体，提高识别率。"""
     gray = ImageOps.grayscale(image)
-
     enhanced = ImageEnhance.Contrast(gray).enhance(1.8)
     enhanced = ImageEnhance.Sharpness(enhanced).enhance(1.5)
-
-    threshold = enhanced.point(
-        lambda p: 255 if p > 155 else 0
-    )
+    threshold = enhanced.point(lambda p: 255 if p > 155 else 0)
 
     return [
         ("ORIGINAL", image),
@@ -312,18 +293,20 @@ def build_ocr_images(image):
 
 def detect_image_contact(image_bytes):
     """
-    对图片进行 OCR 联系方式检测。
+    OCR 检测图片中的网址和联系方式。
 
-    Telegram 用户名、微信等强联系方式匹配一次即拦截。
-    电话号码需要在两次 OCR 结果中被识别，降低误判。
+    网址、Telegram、WhatsApp、微信等强匹配：任一 OCR 版本识别到即拦截。
+    电话号码：通过多版本 OCR 文本合并后再次确认，降低误判。
     """
     try:
         image = image_from_bytes(image_bytes)
         variants = build_ocr_images(image)
 
-        phone_hits = set()
+        all_ocr_text = []
 
         for variant_name, variant in variants:
+            text = ""
+
             try:
                 text = pytesseract.image_to_string(
                     variant,
@@ -331,7 +314,6 @@ def detect_image_contact(image_bytes):
                     config="--psm 6",
                     timeout=20,
                 )
-
             except Exception:
                 try:
                     text = pytesseract.image_to_string(
@@ -340,22 +322,18 @@ def detect_image_contact(image_bytes):
                         config="--psm 11",
                         timeout=20,
                     )
-                except Exception:
+                except Exception as exc:
+                    print(f"   ⚠️ OCR {variant_name} 识别失败: {exc}")
                     continue
+
+            all_ocr_text.append(text)
 
             for name, pattern in CONTACT_PATTERNS:
-                if not pattern.search(text):
-                    continue
+                if pattern.search(text):
+                    if name in STRONG_CONTACT_TYPES:
+                        return name
 
-                if name in STRONG_CONTACT_TYPES:
-                    return name
-
-                if name in PHONE_CONTACT_TYPES:
-                    phone_hits.add(name)
-
-            # 同时识别常见的联系方式提示词
             lower_text = text.lower()
-
             if (
                 "whatsapp" in lower_text
                 or "wechat" in lower_text
@@ -364,36 +342,22 @@ def detect_image_contact(image_bytes):
             ):
                 return "CONTACT_KEYWORD"
 
-        if phone_hits:
-            # 需要两个 OCR 结果确认，减少单次误识别
-            # 由于这里按类别累计，只有不同电话号码类型均出现时
-            # 才会达到两类；下面另外执行一次合并检查。
-            all_text = " ".join(
-                pytesseract.image_to_string(
-                    variant,
-                    lang="eng",
-                    config="--psm 11",
-                    timeout=20,
-                )
-                for _, variant in variants[:2]
-            )
+        merged_text = "\n".join(all_ocr_text)
 
-            for name, pattern in CONTACT_PATTERNS:
-                if (
-                    name in PHONE_CONTACT_TYPES
-                    and pattern.search(all_text)
-                ):
-                    return name
+        for name, pattern in CONTACT_PATTERNS:
+            if name in PHONE_CONTACT_TYPES and pattern.search(merged_text):
+                return name
 
         return None
 
     except Exception as exc:
         print(f"   ⚠️ OCR 检测异常: {exc}")
+        # 安全优先：OCR 整体异常时不自动拦截，避免所有图片都被误删。
         return None
 
 
 # ============================================================
-# 6. 图片添加水印
+# 6. 图片添加水印及压缩
 # ============================================================
 
 def find_font():
@@ -416,75 +380,63 @@ FONT_PATH = find_font()
 
 def add_watermark(image_bytes):
     image = image_from_bytes(image_bytes)
-
-    # 控制图片尺寸，降低 Bot API 上传失败概率
     image.thumbnail(
         (MAX_IMAGE_SIDE, MAX_IMAGE_SIDE),
         Image.Resampling.LANCZOS,
     )
 
     width, height = image.size
-
     font_size = max(18, int(min(width, height) * 0.035))
 
     try:
-        if FONT_PATH:
-            font = ImageFont.truetype(
-                FONT_PATH,
-                font_size,
-            )
-        else:
-            font = ImageFont.load_default()
-
+        font = (
+            ImageFont.truetype(FONT_PATH, font_size)
+            if FONT_PATH
+            else ImageFont.load_default()
+        )
     except Exception:
         font = ImageFont.load_default()
 
-    overlay = Image.new(
-        "RGBA",
-        image.size,
-        (0, 0, 0, 0),
-    )
+    # WATERMARK_TEXT 为空时不绘制文字，但仍进行尺寸处理和 JPEG 压缩。
+    if WATERMARK_TEXT:
+        overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
 
-    draw = ImageDraw.Draw(overlay)
+        bbox = draw.textbbox(
+            (0, 0),
+            WATERMARK_TEXT,
+            font=font,
+            stroke_width=1,
+        )
 
-    bbox = draw.textbbox(
-        (0, 0),
-        WATERMARK_TEXT,
-        font=font,
-        stroke_width=1,
-    )
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        margin = max(12, int(min(width, height) * 0.025))
 
-    text_width = bbox[2] - bbox[0]
-    text_height = bbox[3] - bbox[1]
+        x = max(margin, width - text_width - margin)
+        y = max(margin, height - text_height - margin)
 
-    margin = max(12, int(min(width, height) * 0.025))
+        draw.text(
+            (x, y),
+            WATERMARK_TEXT,
+            font=font,
+            fill=(255, 255, 255, 185),
+            stroke_width=2,
+            stroke_fill=(0, 0, 0, 145),
+        )
 
-    x = max(margin, width - text_width - margin)
-    y = max(margin, height - text_height - margin)
-
-    draw.text(
-        (x, y),
-        WATERMARK_TEXT,
-        font=font,
-        fill=(255, 255, 255, 185),
-        stroke_width=2,
-        stroke_fill=(0, 0, 0, 145),
-    )
-
-    image = Image.alpha_composite(
-        image.convert("RGBA"),
-        overlay,
-    ).convert("RGB")
+        image = Image.alpha_composite(
+            image.convert("RGBA"),
+            overlay,
+        ).convert("RGB")
 
     output = io.BytesIO()
-
     image.save(
         output,
         format="JPEG",
         quality=JPEG_QUALITY,
         optimize=True,
     )
-
     return output.getvalue()
 
 
@@ -493,18 +445,18 @@ def add_watermark(image_bytes):
 # ============================================================
 
 BOT_TARGET_CHANNEL = None
+bot = None
 
 
-async def bot_send_text(bot, text):
+async def bot_send_text(bot_instance, text):
     if not text:
         return False
 
     try:
-        await bot.send_message(
+        await bot_instance.send_message(
             chat_id=BOT_TARGET_CHANNEL,
             text=text[:4096],
         )
-
         print("   ✅ 文字发送成功")
         return True
 
@@ -513,7 +465,7 @@ async def bot_send_text(bot, text):
         return False
 
 
-async def bot_send_photo(bot, image_bytes, caption=None):
+async def bot_send_photo(bot_instance, image_bytes, caption=None):
     try:
         photo_file = InputFile(
             image_bytes,
@@ -528,8 +480,7 @@ async def bot_send_photo(bot, image_bytes, caption=None):
         if caption:
             kwargs["caption"] = caption[:1024]
 
-        await bot.send_photo(**kwargs)
-
+        await bot_instance.send_photo(**kwargs)
         print("   ✅ 单图发送成功")
         return True
 
@@ -539,25 +490,16 @@ async def bot_send_photo(bot, image_bytes, caption=None):
 
 
 # ============================================================
-# 8. 核心修复：直接使用 HTTPX 上传相册
+# 8. 使用 HTTPX 上传相册
 # ============================================================
 
 async def send_album_httpx(items):
     """
     items 格式：
+    [{"image_bytes": b"...", "caption": "..."}]
 
-    [
-        {
-            "image_bytes": b"...",
-            "caption": "..."
-        },
-        ...
-    ]
-
-    通过明确的 multipart 字段名绑定 attach://引用，
-    避免出现 media not found。
+    Telegram sendMediaGroup 每批支持 2-10 张图片。
     """
-
     if not items:
         return False
 
@@ -569,9 +511,7 @@ async def send_album_httpx(items):
         )
 
     if len(items) > 10:
-        raise ValueError(
-            "单次 sendMediaGroup 最多发送 10 张图片"
-        )
+        raise ValueError("单次 sendMediaGroup 最多发送 10 张图片")
 
     media = []
     files = {}
@@ -592,8 +532,6 @@ async def send_album_httpx(items):
         }
 
         caption = item.get("caption")
-
-        # 相册仅将第一张图片的文字作为相册说明
         if index == 0 and caption:
             media_item["caption"] = caption[:1024]
 
@@ -608,21 +546,13 @@ async def send_album_httpx(items):
         ),
     }
 
-    url = (
-        f"https://api.telegram.org/"
-        f"bot{BOT_TOKEN}/sendMediaGroup"
-    )
-
-    timeout = httpx.Timeout(
-        120.0,
-        connect=20.0,
-    )
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMediaGroup"
+    timeout = httpx.Timeout(120.0, connect=20.0)
 
     async with httpx.AsyncClient(
         timeout=timeout,
         follow_redirects=False,
     ) as session:
-
         response = await session.post(
             url,
             data=request_data,
@@ -635,11 +565,7 @@ async def send_album_httpx(items):
         result = {}
 
     if response.status_code != 200 or not result.get("ok"):
-        description = result.get(
-            "description",
-            response.text[:1000],
-        )
-
+        description = result.get("description", response.text[:1000])
         raise RuntimeError(
             f"Telegram API {response.status_code}: {description}"
         )
@@ -648,12 +574,7 @@ async def send_album_httpx(items):
 
 
 async def bot_send_album(items):
-    """
-    相册最多 10 张一批。
-    失败重试 3 次。
-    如果剩余批次只有 1 张，则使用单图接口发送。
-    """
-
+    """相册按每批最多 10 张发送，失败重试。"""
     if not items:
         return False
 
@@ -664,8 +585,7 @@ async def bot_send_album(items):
 
     for chunk_index, chunk in enumerate(chunks, start=1):
         print(
-            f"   📦 SEND ALBUM "
-            f"{chunk_index}/{len(chunks)} "
+            f"   📦 SEND ALBUM {chunk_index}/{len(chunks)} "
             f"({len(chunk)} images)"
         )
 
@@ -679,10 +599,8 @@ async def bot_send_album(items):
                         chunk[0]["image_bytes"],
                         chunk[0].get("caption"),
                     )
-
                     if not success:
                         raise RuntimeError("单图发送失败")
-
                 else:
                     await send_album_httpx(chunk)
                     success = True
@@ -694,11 +612,8 @@ async def bot_send_album(items):
                     f"   ⚠️ BOT ALBUM RETRY "
                     f"{attempt}/{MAX_RETRIES}: {exc}"
                 )
-
                 if attempt < MAX_RETRIES:
-                    await asyncio.sleep(
-                        RETRY_DELAY * attempt
-                    )
+                    await asyncio.sleep(RETRY_DELAY * attempt)
 
         if not success:
             print("   ❌ ALBUM SEND FAILED")
@@ -714,21 +629,19 @@ async def bot_send_album(items):
 
 async def process_single_message(
     client,
-    bot,
+    bot_instance,
     source_entity,
     message,
 ):
     source_id = source_entity.id
 
     if is_processed(source_id, message.id):
-        print(
-            f"   ⏭️ SKIP PROCESSED message={message.id}"
-        )
+        print(f"   ⏭️ SKIP PROCESSED message={message.id}")
         return
 
     text = (message.message or "").strip()
 
-    # 纯文字消息
+    # 纯文字消息：检测网址及联系方式
     if not message.photo:
         if not text:
             mark_processed(source_id, message.id)
@@ -736,62 +649,49 @@ async def process_single_message(
             return
 
         contact = detect_text_contact(text)
-
         if contact:
             print(
-                f"   ❌ SKIP TEXT: CONTACT DETECTED "
-                f"{contact}"
+                f"   ❌ SKIP TEXT: CONTENT DETECTED "
+                f"{contact} message={message.id}"
             )
-
             mark_processed(source_id, message.id)
             save_processed()
             return
 
-        success = await bot_send_text(bot, text)
-
+        success = await bot_send_text(bot_instance, text)
         if success:
             mark_processed(source_id, message.id)
             save_processed()
-
         return
 
-    # 单图消息
-    if text and detect_text_contact(text):
-        print(
-            f"   ❌ SKIP IMAGE: CAPTION CONTACT DETECTED "
-            f"message={message.id}"
-        )
+    # 图片说明文字检测
+    if text:
+        contact = detect_text_contact(text)
+        if contact:
+            print(
+                f"   ❌ SKIP IMAGE: CAPTION CONTENT DETECTED "
+                f"{contact} message={message.id}"
+            )
+            mark_processed(source_id, message.id)
+            save_processed()
+            return
 
-        mark_processed(source_id, message.id)
-        save_processed()
-        return
-
-    image_bytes = await download_image(
-        client,
-        message,
-    )
-
+    image_bytes = await download_image(client, message)
     if not image_bytes:
         return
 
     if detect_qr_code(image_bytes):
-        print(
-            f"   ❌ SKIP IMAGE: QR CODE DETECTED "
-            f"message={message.id}"
-        )
-
+        print(f"   ❌ SKIP IMAGE: QR CODE DETECTED message={message.id}")
         mark_processed(source_id, message.id)
         save_processed()
         return
 
     contact = detect_image_contact(image_bytes)
-
     if contact:
         print(
-            f"   ❌ SKIP IMAGE: OCR CONTACT DETECTED "
+            f"   ❌ SKIP IMAGE: OCR CONTENT DETECTED "
             f"{contact} message={message.id}"
         )
-
         mark_processed(source_id, message.id)
         save_processed()
         return
@@ -799,11 +699,11 @@ async def process_single_message(
     try:
         processed_image = add_watermark(image_bytes)
     except Exception as exc:
-        print(f"   ❌ 水印处理失败: {exc}")
+        print(f"   ❌ 图片处理失败: {exc}")
         return
 
     success = await bot_send_photo(
-        bot,
+        bot_instance,
         processed_image,
         text or None,
     )
@@ -817,24 +717,14 @@ async def process_single_message(
 # 10. 处理相册
 # ============================================================
 
-async def process_album(
-    client,
-    source_entity,
-    album_messages,
-):
+async def process_album(client, source_entity, album_messages):
     source_id = source_entity.id
 
     album_messages.sort(
-        key=lambda message: (
-            message.date,
-            message.id,
-        )
+        key=lambda message: (message.date, message.id)
     )
 
-    print(
-        f"\n📚 ALBUM "
-        f"MESSAGES={len(album_messages)}"
-    )
+    print(f"\n📚 ALBUM MESSAGES={len(album_messages)}")
 
     send_items = []
     rejected_ids = []
@@ -842,68 +732,50 @@ async def process_album(
 
     for message in album_messages:
         if is_processed(source_id, message.id):
-            print(
-                f"   ⏭️ SKIP PROCESSED "
-                f"message={message.id}"
-            )
+            print(f"   ⏭️ SKIP PROCESSED message={message.id}")
             continue
 
         caption = (message.message or "").strip()
 
-        # 相册中每张图片独立检查
-        if caption and detect_text_contact(caption):
-            print(
-                f"   ❌ SKIP ALBUM IMAGE "
-                f"CAPTION CONTACT message={message.id}"
-            )
-
-            rejected_ids.append(message.id)
-            continue
+        if caption:
+            contact = detect_text_contact(caption)
+            if contact:
+                print(
+                    f"   ❌ SKIP ALBUM IMAGE CAPTION "
+                    f"{contact} message={message.id}"
+                )
+                rejected_ids.append(message.id)
+                continue
 
         if not message.photo:
-            # 相册中没有图片的项目不作为图片上传
             rejected_ids.append(message.id)
             continue
 
-        image_bytes = await download_image(
-            client,
-            message,
-        )
-
+        image_bytes = await download_image(client, message)
         if not image_bytes:
             print(
-                f"   ⚠️ 图片下载失败，暂不标记 "
-                f"message={message.id}"
+                f"   ⚠️ 图片下载失败，暂不标记 message={message.id}"
             )
             continue
 
         if detect_qr_code(image_bytes):
-            print(
-                f"   ❌ SKIP ALBUM IMAGE "
-                f"QR DETECTED message={message.id}"
-            )
-
+            print(f"   ❌ SKIP ALBUM IMAGE QR message={message.id}")
             rejected_ids.append(message.id)
             continue
 
         contact = detect_image_contact(image_bytes)
-
         if contact:
             print(
-                f"   ❌ SKIP ALBUM IMAGE "
-                f"OCR CONTACT {contact} "
+                f"   ❌ SKIP ALBUM IMAGE OCR {contact} "
                 f"message={message.id}"
             )
-
             rejected_ids.append(message.id)
             continue
 
         try:
             watermarked = add_watermark(image_bytes)
         except Exception as exc:
-            print(
-                f"   ❌ 水印失败 message={message.id}: {exc}"
-            )
+            print(f"   ❌ 图片处理失败 message={message.id}: {exc}")
             continue
 
         send_items.append(
@@ -913,46 +785,31 @@ async def process_album(
                 "message_id": message.id,
             }
         )
-
         pending_ids.append(message.id)
 
-    # 所有图片都被过滤时，记录过滤结果
     if not send_items:
         for message_id in rejected_ids:
             mark_processed(source_id, message_id)
 
         save_processed()
-
         print("   ℹ️ 相册没有可发布图片")
         return
 
-    print(
-        f"   📦 SEND ALBUM ({len(send_items)} images)"
-    )
-
-    # sendMediaGroup 只能每批发送 2–10 张图片
-    # 若只有 1 张，bot_send_album 会自动使用 send_photo
+    print(f"   📦 SEND ALBUM ({len(send_items)} images)")
     success = await bot_send_album(send_items)
 
     if success:
-        for message_id in pending_ids:
-            mark_processed(source_id, message_id)
-
-        for message_id in rejected_ids:
+        for message_id in pending_ids + rejected_ids:
             mark_processed(source_id, message_id)
 
         save_processed()
-
         print("   ✅ ALBUM PUBLISH SUCCESS")
 
     else:
-        # 只保存明确过滤掉的消息。
-        # 上传失败的有效图片不标记为已发布。
         for message_id in rejected_ids:
             mark_processed(source_id, message_id)
 
         save_processed()
-
         print("   ❌ ALBUM PUBLISH FAILED")
         print("   ⚠️ 有效图片不会写入 processed.json")
 
@@ -961,11 +818,7 @@ async def process_album(
 # 11. 获取北京时间当天消息
 # ============================================================
 
-async def collect_today_messages(
-    client,
-    source_entity,
-    source_name,
-):
+async def collect_today_messages(client, source_entity, source_name):
     now = datetime.now(BEIJING_TZ)
 
     today_start = now.replace(
@@ -974,7 +827,6 @@ async def collect_today_messages(
         second=0,
         microsecond=0,
     )
-
     today_end = today_start + timedelta(days=1)
 
     messages = []
@@ -986,18 +838,12 @@ async def collect_today_messages(
 
     limit = SCAN_LIMIT if SCAN_LIMIT > 0 else None
 
-    async for message in client.iter_messages(
-        source_entity,
-        limit=limit,
-    ):
+    async for message in client.iter_messages(source_entity, limit=limit):
         if not message.date:
             continue
 
-        message_time = message.date.astimezone(
-            BEIJING_TZ
-        )
+        message_time = message.date.astimezone(BEIJING_TZ)
 
-        # iter_messages 默认从新到旧读取
         if message_time < today_start:
             break
 
@@ -1012,10 +858,7 @@ async def collect_today_messages(
         messages.append(message)
 
     messages.sort(
-        key=lambda message: (
-            message.date,
-            message.id,
-        )
+        key=lambda message: (message.date, message.id)
     )
 
     print(f"   📥 TODAY MESSAGES: {len(messages)}")
@@ -1029,27 +872,18 @@ async def collect_today_messages(
 # ============================================================
 
 async def resolve_target(client):
-    target_entity = await client.get_entity(
-        TARGET_CHANNEL
-    )
+    target_entity = await client.get_entity(TARGET_CHANNEL)
 
     print("\n🎯 TARGET ENTITY")
     print(f"   TITLE: {getattr(target_entity, 'title', '')}")
     print(f"   ID: {target_entity.id}")
     print(f"   USERNAME: {getattr(target_entity, 'username', None)}")
 
-    username = getattr(
-        target_entity,
-        "username",
-        None,
-    )
-
+    username = getattr(target_entity, "username", None)
     if username:
         return target_entity, f"@{username}"
 
-    # 私有频道必须使用 Telethon 解析出的完整 peer ID
     peer_id = utils.get_peer_id(target_entity)
-
     return target_entity, peer_id
 
 
@@ -1057,24 +891,19 @@ async def resolve_target(client):
 # 13. 检查 Bot 目标频道
 # ============================================================
 
-async def diagnose_bot_target(bot):
+async def diagnose_bot_target(bot_instance):
     global BOT_TARGET_CHANNEL
 
     print("\n🤖 BOT TARGET DIAGNOSTIC")
 
-    me = await bot.get_me()
+    me = await bot_instance.get_me()
 
     print("   ✅ BOT TOKEN VALID")
     print(f"   BOT ID: {me.id}")
     print(f"   BOT USERNAME: @{me.username}")
+    print(f"   BOT TARGET: {BOT_TARGET_CHANNEL}")
 
-    print(
-        f"   BOT TARGET: {BOT_TARGET_CHANNEL}"
-    )
-
-    chat = await bot.get_chat(
-        chat_id=BOT_TARGET_CHANNEL
-    )
+    chat = await bot_instance.get_chat(chat_id=BOT_TARGET_CHANNEL)
 
     print("   ✅ BOT CAN ACCESS TARGET")
     print(f"   CHAT ID: {chat.id}")
@@ -1098,17 +927,11 @@ async def main():
 
     print(f"SOURCE CHANNELS: {SOURCE_CHANNELS}")
     print(f"TARGET CHANNEL: {TARGET_CHANNEL}")
-    print(
-        "BEIJING DATE:",
-        datetime.now(BEIJING_TZ).isoformat(),
-    )
+    print("BEIJING DATE:", datetime.now(BEIJING_TZ).isoformat())
 
     if not SOURCE_CHANNELS:
-        raise RuntimeError(
-            "SOURCE_CHANNELS 未配置"
-        )
+        raise RuntimeError("SOURCE_CHANNELS 未配置")
 
-    # StringSession 是 GitHub Actions 无本地 session 文件时的登录方式
     client = TelegramClient(
         StringSession(TELEGRAM_SESSION),
         API_ID,
@@ -1116,12 +939,10 @@ async def main():
     )
 
     print("\n🔌 CONNECTING TELEGRAM...")
-
     await client.connect()
 
     if not await client.is_user_authorized():
         await client.disconnect()
-
         raise RuntimeError(
             "Telegram Session 无效或已过期，请重新生成 TELEGRAM_SESSION"
         )
@@ -1132,20 +953,14 @@ async def main():
     await bot.initialize()
 
     try:
-        target_entity, BOT_TARGET_CHANNEL = await resolve_target(
-            client
-        )
-
+        target_entity, BOT_TARGET_CHANNEL = await resolve_target(client)
         await diagnose_bot_target(bot)
 
-        # 保存源频道消息，随后按时间排序发送
         all_events = []
 
         for source_name in SOURCE_CHANNELS:
             try:
-                source_entity = await client.get_entity(
-                    source_name
-                )
+                source_entity = await client.get_entity(source_name)
 
                 print(
                     f"\n📡 SOURCE ENTITY: "
@@ -1158,15 +973,12 @@ async def main():
                     source_name,
                 )
 
-                # 先按 grouped_id 归类相册
                 album_groups = defaultdict(list)
                 standalone = []
 
                 for message in messages:
                     if getattr(message, "grouped_id", None):
-                        album_groups[
-                            message.grouped_id
-                        ].append(message)
+                        album_groups[message.grouped_id].append(message)
                     else:
                         standalone.append(message)
 
@@ -1183,10 +995,7 @@ async def main():
 
                 for grouped_id, group_messages in album_groups.items():
                     group_messages.sort(
-                        key=lambda message: (
-                            message.date,
-                            message.id,
-                        )
+                        key=lambda message: (message.date, message.id)
                     )
 
                     all_events.append(
@@ -1201,18 +1010,12 @@ async def main():
                     )
 
             except Exception as exc:
-                print(
-                    f"❌ SOURCE SCAN FAILED "
-                    f"{source_name}: {exc}"
-                )
+                print(f"❌ SOURCE SCAN FAILED {source_name}: {exc}")
 
-        # 所有来源按实际发布时间排序
         all_events.sort(
             key=lambda event: (
                 event["date"],
-                SOURCE_CHANNELS.index(
-                    event["source_name"]
-                ),
+                SOURCE_CHANNELS.index(event["source_name"]),
                 event["messages"][0].id,
             )
         )
