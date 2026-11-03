@@ -15,7 +15,7 @@ import numpy as np
 import pytesseract
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
-from telethon import TelegramClient, utils
+from telethon import TelegramClient, utils, events
 from telethon.sessions import StringSession
 from telegram import Bot, InputFile
 
@@ -914,157 +914,136 @@ async def diagnose_bot_target(bot_instance):
 
 
 # ============================================================
-# 14. 主运行逻辑
+# 14. 实时监听逻辑
 # ============================================================
 
+# 串行处理事件，降低并发转发和 processed.json 写入冲突的风险。
+PROCESS_LOCK = asyncio.Lock()
+live_client = None
+
+
+async def handle_live_single(event, source_entity):
+    message = event.message
+
+    # 相册由 events.Album 统一处理，避免相册被拆成单张图片转发。
+    if getattr(message, "grouped_id", None):
+        return
+
+    async with PROCESS_LOCK:
+        try:
+            await process_single_message(
+                client=live_client,
+                bot_instance=bot,
+                source_entity=source_entity,
+                message=message,
+            )
+        except Exception as exc:
+            logging.exception("实时单条消息处理失败: %s", exc)
+
+
+async def handle_live_album(event, source_entity):
+    messages = list(getattr(event, "messages", []) or [])
+    if not messages:
+        return
+
+    async with PROCESS_LOCK:
+        try:
+            await process_album(
+                client=live_client,
+                source_entity=source_entity,
+                album_messages=messages,
+            )
+        except Exception as exc:
+            logging.exception("实时相册处理失败: %s", exc)
+
+
 async def main():
-    global bot
-    global BOT_TARGET_CHANNEL
+    global bot, BOT_TARGET_CHANNEL, live_client
 
     print("=" * 65)
-    print("Telegram Channel Forwarder")
+    print("Telegram Channel Forwarder - REAL-TIME MODE")
     print("=" * 65)
-
     print(f"SOURCE CHANNELS: {SOURCE_CHANNELS}")
     print(f"TARGET CHANNEL: {TARGET_CHANNEL}")
-    print("BEIJING DATE:", datetime.now(BEIJING_TZ).isoformat())
+    print("BEIJING TIME:", datetime.now(BEIJING_TZ).isoformat())
 
     if not SOURCE_CHANNELS:
         raise RuntimeError("SOURCE_CHANNELS 未配置")
 
-    client = TelegramClient(
+    live_client = TelegramClient(
         StringSession(TELEGRAM_SESSION),
         API_ID,
         API_HASH,
     )
 
-    print("\n🔌 CONNECTING TELEGRAM...")
-    await client.connect()
+    print("\n🔌 正在连接 Telegram 用户账号...")
+    await live_client.connect()
 
-    if not await client.is_user_authorized():
-        await client.disconnect()
+    if not await live_client.is_user_authorized():
+        await live_client.disconnect()
         raise RuntimeError(
             "Telegram Session 无效或已过期，请重新生成 TELEGRAM_SESSION"
         )
 
-    print("✅ TELEGRAM CONNECTED")
+    print("✅ Telegram 用户账号已连接")
 
     bot = Bot(token=BOT_TOKEN)
     await bot.initialize()
 
     try:
-        target_entity, BOT_TARGET_CHANNEL = await resolve_target(client)
+        # 解析目标频道，取得 Bot API 使用的目标频道 ID/用户名。
+        _, BOT_TARGET_CHANNEL = await resolve_target(live_client)
         await diagnose_bot_target(bot)
 
-        all_events = []
-
+        registered = 0
         for source_name in SOURCE_CHANNELS:
             try:
-                source_entity = await client.get_entity(source_name)
+                source_entity = await live_client.get_entity(source_name)
 
                 print(
-                    f"\n📡 SOURCE ENTITY: "
-                    f"{getattr(source_entity, 'title', source_name)}"
+                    f"📡 正在监听: "
+                    f"{getattr(source_entity, 'title', source_name)} "
+                    f"(ID={source_entity.id})"
                 )
 
-                messages = await collect_today_messages(
-                    client,
-                    source_entity,
-                    source_name,
+                async def single_callback(event, entity=source_entity):
+                    await handle_live_single(event, entity)
+
+                async def album_callback(event, entity=source_entity):
+                    await handle_live_album(event, entity)
+
+                live_client.add_event_handler(
+                    single_callback,
+                    events.NewMessage(chats=source_entity),
                 )
-
-                album_groups = defaultdict(list)
-                standalone = []
-
-                for message in messages:
-                    if getattr(message, "grouped_id", None):
-                        album_groups[message.grouped_id].append(message)
-                    else:
-                        standalone.append(message)
-
-                for message in standalone:
-                    all_events.append(
-                        {
-                            "date": message.date,
-                            "source_name": source_name,
-                            "source_entity": source_entity,
-                            "type": "single",
-                            "messages": [message],
-                        }
-                    )
-
-                for grouped_id, group_messages in album_groups.items():
-                    group_messages.sort(
-                        key=lambda message: (message.date, message.id)
-                    )
-
-                    all_events.append(
-                        {
-                            "date": group_messages[0].date,
-                            "source_name": source_name,
-                            "source_entity": source_entity,
-                            "type": "album",
-                            "messages": group_messages,
-                            "grouped_id": grouped_id,
-                        }
-                    )
+                live_client.add_event_handler(
+                    album_callback,
+                    events.Album(chats=source_entity),
+                )
+                registered += 1
 
             except Exception as exc:
-                print(f"❌ SOURCE SCAN FAILED {source_name}: {exc}")
+                logging.exception(
+                    "来源频道注册监听失败 %s: %s", source_name, exc
+                )
 
-        all_events.sort(
-            key=lambda event: (
-                event["date"],
-                SOURCE_CHANNELS.index(event["source_name"]),
-                event["messages"][0].id,
+        if registered == 0:
+            raise RuntimeError(
+                "没有成功注册任何来源频道监听，请检查 SOURCE_CHANNELS 配置及账号权限"
             )
-        )
 
-        print("\n" + "=" * 65)
-        print("📤 PROCESSING MESSAGES")
+        print("=" * 65)
+        print(f"🟢 实时监听已启动：成功监听 {registered} 个来源频道")
+        print("收到新文字、图片或相册后将自动过滤并转发。")
+        print("此模式只监听启动后的新消息，不会自动补发历史消息。")
+        print("必须部署在持续运行的后台服务；GitHub Actions 定时任务不能 24/7 常驻。")
         print("=" * 65)
 
-        seen_albums = set()
-
-        for event in all_events:
-            source_entity = event["source_entity"]
-            messages = event["messages"]
-
-            if event["type"] == "album":
-                album_key = (
-                    source_entity.id,
-                    event["grouped_id"],
-                )
-
-                if album_key in seen_albums:
-                    continue
-
-                seen_albums.add(album_key)
-
-                await process_album(
-                    client,
-                    source_entity,
-                    messages,
-                )
-
-            else:
-                await process_single_message(
-                    client,
-                    bot,
-                    source_entity,
-                    messages[0],
-                )
-
-        save_processed()
-
-        print("\n" + "=" * 65)
-        print("✅ FORWARDING RUN FINISHED")
-        print(f"PROCESSED RECORDS: {len(PROCESSED)}")
-        print("=" * 65)
+        await live_client.run_until_disconnected()
 
     finally:
         await bot.shutdown()
-        await client.disconnect()
+        await live_client.disconnect()
 
 
 if __name__ == "__main__":
