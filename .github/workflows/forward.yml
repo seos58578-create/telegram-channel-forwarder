@@ -1,14 +1,10 @@
+
 name: Telegram Channel Forwarder
 
 on:
-  workflow_dispatch:
   schedule:
-    # 北京时间 11:47、15:47、17:47、18:47、19:47
-    - cron: '47 3,7,9,10,11 * * *'
-    # 北京时间 20:47
-    - cron: '47 12 * * *'
-    # 北京时间 21:23、21:24
-    - cron: '23,24 13 * * *'
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -20,38 +16,35 @@ concurrency:
 jobs:
   forward:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          ref: main
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
+          cache: "pip"
 
       - name: Install Tesseract OCR
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             tesseract-ocr \
-            tesseract-ocr-eng \
             tesseract-ocr-chi-sim \
             tesseract-ocr-vie \
             tesseract-ocr-por
 
-      - name: Install CJK Fonts
-        run: |
-          sudo apt-get install -y fonts-noto-cjk
-
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          pip install -r requirements.txt
 
-      - name: Run Telegram Forwarder
+      - name: Run Telegram forwarder
         env:
           API_ID: ${{ secrets.API_ID }}
           API_HASH: ${{ secrets.API_HASH }}
@@ -59,20 +52,14 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           SOURCE_CHANNELS: ${{ secrets.SOURCE_CHANNELS }}
           TARGET_CHANNEL: ${{ secrets.TARGET_CHANNEL }}
-          SCAN_LIMIT: ${{ secrets.SCAN_LIMIT }}
-        run: |
-          python main.py
+          SCAN_LIMIT: "0"
+        run: python main.py
 
-      - name: Commit processed.json
+      - name: Save processed records
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
           git add processed.json
-
-          if git diff --cached --quiet; then
-            echo "No changes to processed.json"
-          else
-            git commit -m "Update processed messages"
-            git push
-          fi
+          git diff --cached --quiet || git commit -m "Update processed messages"
+          git push
