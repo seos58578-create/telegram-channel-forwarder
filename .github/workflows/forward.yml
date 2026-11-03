@@ -4,6 +4,7 @@ name: Telegram Channel Forwarder
 on:
   schedule:
     - cron: "*/5 * * * *"
+
   workflow_dispatch:
 
 permissions:
@@ -15,21 +16,26 @@ concurrency:
 
 jobs:
   forward:
+    name: Scan and Forward Telegram Messages
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
+      # 1. 获取 GitHub 仓库代码
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           ref: main
+          fetch-depth: 0
 
+      # 2. 配置 Python
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
+      # 3. 安装 Tesseract OCR 和语言包
       - name: Install Tesseract OCR
         run: |
           sudo apt-get update
@@ -39,11 +45,13 @@ jobs:
             tesseract-ocr-vie \
             tesseract-ocr-por
 
+      # 4. 安装 Python 依赖
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # 5. 执行定时扫描程序
       - name: Run Telegram forwarder
         env:
           API_ID: ${{ secrets.API_ID }}
@@ -53,13 +61,25 @@ jobs:
           SOURCE_CHANNELS: ${{ secrets.SOURCE_CHANNELS }}
           TARGET_CHANNEL: ${{ secrets.TARGET_CHANNEL }}
           SCAN_LIMIT: "0"
-        run: python main.py
+        run: |
+          python main.py
 
+      # 6. 保存 processed.json 去重记录
       - name: Save processed records
         if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add processed.json
-          git diff --cached --quiet || git commit -m "Update processed messages"
-          git push
+
+          if [ -f processed.json ]; then
+            git add processed.json
+
+            if ! git diff --cached --quiet; then
+              git commit -m "Update processed messages"
+              git push origin HEAD:main
+            else
+              echo "No processed records changed."
+            fi
+          else
+            echo "processed.json does not exist."
+          fi
