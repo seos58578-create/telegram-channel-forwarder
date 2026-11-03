@@ -1,0 +1,1184 @@
+import asyncio
+import io
+import json
+import logging
+import os
+import re
+import time
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import cv2
+import httpx
+import numpy as np
+import pytesseract
+
+from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
+from telethon import TelegramClient, utils, events
+from telethon.sessions import StringSession
+from telegram import Bot, InputFile
+
+
+# ============================================================
+# 1. 基础配置
+# ============================================================
+
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+API_ID = int(os.environ["API_ID"])
+API_HASH = os.environ["API_HASH"]
+TELEGRAM_SESSION = os.environ["TELEGRAM_SESSION"]
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+
+SOURCE_CHANNELS = [
+    x.strip()
+    for x in os.environ["SOURCE_CHANNELS"].split(",")
+    if x.strip()
+]
+
+TARGET_CHANNEL = os.environ["TARGET_CHANNEL"].strip()
+SCAN_LIMIT = int(os.environ.get("SCAN_LIMIT", "0"))
+
+PROCESSED_FILE = Path("processed.json")
+WATERMARK_TEXT = ""
+
+OCR_LANG = "eng+chi_sim+vie+por"
+
+MAX_RETRIES = 3
+RETRY_DELAY = 3
+
+MAX_IMAGE_SIDE = 2000
+JPEG_QUALITY = 88
+
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+
+for logger_name in [
+    "telethon",
+    "telethon.network",
+    "telethon.extensions",
+    "httpx",
+    "httpcore",
+    "telegram",
+]:
+    logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+
+# ============================================================
+# 2. 联系方式及网址检测规则
+# ============================================================
+
+CONTACT_PATTERNS = [
+    (
+        "URL",
+        re.compile(
+            r"(?i)(?:"
+            r"(?:https?://|ftp://|www\.)[^\s<>\"']+"
+            r"|"
+            r"(?<![@\w.-])"
+            r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+            r"[a-z]{2,}"
+            r"(?:/[^\s<>\"']*)?"
+            r")"
+        ),
+    ),
+    (
+        "TELEGRAM_LINK",
+        re.compile(
+            r"(?:https?://)?(?:www\.)?"
+            r"(?:t\.me|telegram\.me)/"
+            r"[A-Za-z0-9_+/=?-]{4,64}",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "TELEGRAM_USERNAME",
+        re.compile(r"@[A-Za-z][A-Za-z0-9_]{4,31}"),
+    ),
+    (
+        "WHATSAPP_LINK",
+        re.compile(
+            r"(?:https?://)?(?:www\.)?wa\.me/\d{7,15}",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "WHATSAPP_TEXT",
+        re.compile(r"\bwhatsapp\b", re.IGNORECASE),
+    ),
+    (
+        "WECHAT",
+        re.compile(r"\bwechat\b", re.IGNORECASE),
+    ),
+    (
+        "WECHAT_CN",
+        re.compile(r"微信|微信号|微[信號号]"),
+    ),
+    (
+        "CN_PHONE",
+        re.compile(r"(?<!\d)(?:\+?86[- ]?)?1[3-9]\d{9}(?!\d)"),
+    ),
+    (
+        "VN_PHONE",
+        re.compile(
+            r"(?<!\d)(?:\+?84[- ]?)?"
+            r"(?:0?3|0?5|0?7|0?8|0?9)\d{8}(?!\d)"
+        ),
+    ),
+]
+
+STRONG_CONTACT_TYPES = {
+    "URL",
+    "TELEGRAM_LINK",
+    "TELEGRAM_USERNAME",
+    "WHATSAPP_LINK",
+    "WHATSAPP_TEXT",
+    "WECHAT",
+    "WECHAT_CN",
+}
+
+PHONE_CONTACT_TYPES = {
+    "CN_PHONE",
+    "VN_PHONE",
+}
+
+# 图片出现以下关键词时直接跳过，不采集、不转发。
+BLOCKED_IMAGE_KEYWORDS = (
+    "实时返水",
+    "极速出款",
+    "注册送",
+)
+
+
+def detect_blocked_image_keyword(text):
+    """忽略空格和常见分隔符后匹配图片 OCR 文字。"""
+    if not text:
+        return None
+
+    compact = re.sub(
+        r"[\s\W_]+",
+        "",
+        text,
+        flags=re.UNICODE,
+    ).lower()
+
+    for keyword in BLOCKED_IMAGE_KEYWORDS:
+        normalized = re.sub(
+            r"[\s\W_]+",
+            "",
+            keyword,
+            flags=re.UNICODE,
+        ).lower()
+
+        if normalized in compact:
+            return keyword
+
+    return None
+
+
+def detect_text_contact(text):
+    """检测文字、图片说明中的网址和联系方式。"""
+    if not text:
+        return None
+
+    for name, pattern in CONTACT_PATTERNS:
+        if pattern.search(text):
+            return name
+
+    return None
+
+
+# ============================================================
+# 3. processed.json 去重记录
+# ============================================================
+
+def load_processed():
+    if not PROCESSED_FILE.exists():
+        return set()
+
+    try:
+        data = json.loads(
+            PROCESSED_FILE.read_text(encoding="utf-8")
+        )
+
+        messages = data.get("messages", [])
+
+        if isinstance(messages, dict):
+            messages = list(messages.keys())
+
+        return {str(x) for x in messages}
+
+    except Exception as exc:
+        print(f"⚠️ processed.json 读取失败: {exc}")
+        return set()
+
+
+PROCESSED = load_processed()
+
+
+def save_processed():
+    """原子写入，避免文件写到一半中断。"""
+    data = {
+        "messages": sorted(PROCESSED),
+        "updated_at": datetime.now(BEIJING_TZ).isoformat(),
+    }
+
+    temp_file = PROCESSED_FILE.with_suffix(".json.tmp")
+
+    temp_file.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    temp_file.replace(PROCESSED_FILE)
+
+
+def message_key(source_id, message_id):
+    return f"{source_id}:{message_id}"
+
+
+def is_processed(source_id, message_id):
+    return (
+        message_key(source_id, message_id) in PROCESSED
+        or str(message_id) in PROCESSED
+    )
+
+
+def mark_processed(source_id, message_id):
+    PROCESSED.add(message_key(source_id, message_id))
+
+
+# ============================================================
+# 4. 图片下载与二维码检测
+# ============================================================
+
+async def download_image(client, message):
+    try:
+        data = await client.download_media(
+            message,
+            file=bytes,
+        )
+
+        if not data:
+            print(f"   ❌ 图片下载失败 message={message.id}")
+            return None
+
+        return data
+
+    except Exception as exc:
+        print(
+            f"   ❌ 图片下载异常 message={message.id}: {exc}"
+        )
+        return None
+
+
+def image_from_bytes(image_bytes):
+    image = Image.open(io.BytesIO(image_bytes))
+    image = ImageOps.exif_transpose(image)
+    return image.convert("RGB")
+
+
+def detect_qr_code(image_bytes):
+    """
+    检测二维码。
+    如果检测到二维码，即使二维码内容未能解码，也按有二维码处理。
+    """
+    try:
+        image = image_from_bytes(image_bytes)
+
+        image_array = cv2.cvtColor(
+            np.array(image),
+            cv2.COLOR_RGB2BGR,
+        )
+
+        detector = cv2.QRCodeDetector()
+
+        try:
+            detected, decoded_info, points, _ = (
+                detector.detectAndDecodeMulti(image_array)
+            )
+
+            if detected and points is not None:
+                return True
+
+        except Exception:
+            pass
+
+        try:
+            decoded, points, _ = detector.detectAndDecode(
+                image_array
+            )
+
+            if points is not None or decoded:
+                return True
+
+        except Exception:
+            pass
+
+        return False
+
+    except Exception as exc:
+        print(f"   ⚠️ 二维码检测异常: {exc}")
+        return False
+
+
+# ============================================================
+# 5. OCR 网址及联系方式检测
+# ============================================================
+
+def build_ocr_images(image):
+    """生成 OCR 变体，提高识别率。"""
+    gray = ImageOps.grayscale(image)
+
+    enhanced = ImageEnhance.Contrast(gray).enhance(1.8)
+    enhanced = ImageEnhance.Sharpness(enhanced).enhance(1.5)
+
+    threshold = enhanced.point(
+        lambda p: 255 if p > 155 else 0
+    )
+
+    return [
+        ("ORIGINAL", image),
+        ("ENHANCED", enhanced),
+        ("THRESHOLD", threshold),
+    ]
+
+
+def detect_image_contact(image_bytes):
+    """
+    OCR 检测图片中的网址和联系方式。
+
+    网址、Telegram、WhatsApp、微信等强匹配：
+    任一 OCR 版本识别到即拦截。
+
+    电话号码：
+    通过多版本 OCR 文本合并后再次确认，降低误判。
+    """
+    try:
+        image = image_from_bytes(image_bytes)
+        variants = build_ocr_images(image)
+
+        all_ocr_text = []
+
+        for variant_name, variant in variants:
+            text = ""
+
+            try:
+                text = pytesseract.image_to_string(
+                    variant,
+                    lang=OCR_LANG,
+                    config="--psm 6",
+                    timeout=20,
+                )
+
+            except Exception:
+                try:
+                    text = pytesseract.image_to_string(
+                        variant,
+                        lang="eng",
+                        config="--psm 11",
+                        timeout=20,
+                    )
+
+                except Exception as exc:
+                    print(
+                        f"   ⚠️ OCR {variant_name} 识别失败: {exc}"
+                    )
+                    continue
+
+            all_ocr_text.append(text)
+
+            blocked_keyword = detect_blocked_image_keyword(text)
+
+            if blocked_keyword:
+                return (
+                    f"BLOCKED_PROMO_KEYWORD:{blocked_keyword}"
+                )
+
+            for name, pattern in CONTACT_PATTERNS:
+                if pattern.search(text):
+                    if name in STRONG_CONTACT_TYPES:
+                        return name
+
+            lower_text = text.lower()
+
+            if (
+                "whatsapp" in lower_text
+                or "wechat" in lower_text
+                or "微信号" in text
+                or "微信" in text
+            ):
+                return "CONTACT_KEYWORD"
+
+        merged_text = "\n".join(all_ocr_text)
+
+        for name, pattern in CONTACT_PATTERNS:
+            if (
+                name in PHONE_CONTACT_TYPES
+                and pattern.search(merged_text)
+            ):
+                return name
+
+        return None
+
+    except Exception as exc:
+        print(f"   ⚠️ OCR 检测异常: {exc}")
+        return None
+      # ============================================================
+# 6. 图片添加水印及压缩
+# ============================================================
+
+def find_font():
+    candidates = [
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+
+    return None
+
+
+FONT_PATH = find_font()
+
+
+def add_watermark(image_bytes):
+    image = image_from_bytes(image_bytes)
+    image.thumbnail(
+        (MAX_IMAGE_SIDE, MAX_IMAGE_SIDE),
+        Image.Resampling.LANCZOS,
+    )
+
+    width, height = image.size
+    font_size = max(18, int(min(width, height) * 0.035))
+
+    try:
+        font = (
+            ImageFont.truetype(FONT_PATH, font_size)
+            if FONT_PATH
+            else ImageFont.load_default()
+        )
+    except Exception:
+        font = ImageFont.load_default()
+
+    # WATERMARK_TEXT 为空时不绘制文字，但仍进行尺寸处理和 JPEG 压缩。
+    if WATERMARK_TEXT:
+        overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+
+        bbox = draw.textbbox(
+            (0, 0),
+            WATERMARK_TEXT,
+            font=font,
+            stroke_width=1,
+        )
+
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        margin = max(12, int(min(width, height) * 0.025))
+
+        x = max(margin, width - text_width - margin)
+        y = max(margin, height - text_height - margin)
+
+        draw.text(
+            (x, y),
+            WATERMARK_TEXT,
+            font=font,
+            fill=(255, 255, 255, 185),
+            stroke_width=2,
+            stroke_fill=(0, 0, 0, 145),
+        )
+
+        image = Image.alpha_composite(
+            image.convert("RGBA"),
+            overlay,
+        ).convert("RGB")
+
+    output = io.BytesIO()
+
+    image.save(
+        output,
+        format="JPEG",
+        quality=JPEG_QUALITY,
+        optimize=True,
+    )
+
+    return output.getvalue()
+
+
+# ============================================================
+# 7. Bot 发送文字与单图
+# ============================================================
+
+BOT_TARGET_CHANNEL = None
+bot = None
+
+
+async def bot_send_text(bot_instance, text):
+    if not text:
+        return False
+
+    try:
+        await bot_instance.send_message(
+            chat_id=BOT_TARGET_CHANNEL,
+            text=text[:4096],
+        )
+
+        print("   ✅ 文字发送成功")
+        return True
+
+    except Exception as exc:
+        print(f"   ❌ 文字发送失败: {exc}")
+        return False
+
+
+async def bot_send_photo(bot_instance, image_bytes, caption=None):
+    try:
+        photo_file = InputFile(
+            image_bytes,
+            filename=f"photo_{int(time.time() * 1000)}.jpg",
+        )
+
+        kwargs = {
+            "chat_id": BOT_TARGET_CHANNEL,
+            "photo": photo_file,
+        }
+
+        if caption:
+            kwargs["caption"] = caption[:1024]
+
+        await bot_instance.send_photo(**kwargs)
+
+        print("   ✅ 单图发送成功")
+        return True
+
+    except Exception as exc:
+        print(f"   ❌ 单图发送失败: {exc}")
+        return False
+
+
+# ============================================================
+# 8. 使用 HTTPX 上传相册
+# ============================================================
+
+async def send_album_httpx(items):
+    """
+    items 格式：
+    [{"image_bytes": b"...", "caption": "..."}]
+    """
+
+    if not items:
+        return False
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMediaGroup"
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        files = {}
+        media = []
+
+        try:
+            for index, item in enumerate(items):
+                attach_name = f"photo{index}"
+
+                files[attach_name] = (
+                    f"{attach_name}.jpg",
+                    item["image_bytes"],
+                    "image/jpeg",
+                )
+
+                media_item = {
+                    "type": "photo",
+                    "media": f"attach://{attach_name}",
+                }
+
+                if index == 0 and item.get("caption"):
+                    media_item["caption"] = item["caption"][:1024]
+
+                media.append(media_item)
+
+            async with httpx.AsyncClient(timeout=60) as client:
+                response = await client.post(
+                    url,
+                    data={
+                        "media": json.dumps(
+                            media,
+                            ensure_ascii=False,
+                        )
+                    },
+                    files=files,
+                )
+
+            result = response.json()
+
+            if response.is_success and result.get("ok"):
+                print("   ✅ 相册发送成功")
+                return True
+
+            print(
+                f"   ❌ 相册发送失败 "
+                f"attempt={attempt}: {result}"
+            )
+
+        except Exception as exc:
+            print(
+                f"   ❌ 相册发送异常 "
+                f"attempt={attempt}: {exc}"
+            )
+
+        if attempt < MAX_RETRIES:
+            await asyncio.sleep(RETRY_DELAY)
+
+    return False
+
+
+async def bot_send_album(items):
+    if not items:
+        return False
+
+    if len(items) == 1:
+        item = items[0]
+
+        return await bot_send_photo(
+            bot,
+            item["image_bytes"],
+            item.get("caption"),
+        )
+
+    return await send_album_httpx(items)
+
+
+# ============================================================
+# 9. 处理单条消息
+# ============================================================
+
+async def process_single_message(
+    client,
+    bot_instance,
+    source_entity,
+    message,
+):
+    source_id = source_entity.id
+
+    if is_processed(source_id, message.id):
+        print(f"   ⏭️ SKIP PROCESSED message={message.id}")
+        return
+
+    text = (message.message or "").strip()
+
+    print(f"\n📩 MESSAGE ID={message.id}")
+
+    if text:
+        contact = detect_text_contact(text)
+
+        if contact:
+            print(
+                f"   ❌ SKIP TEXT CONTACT "
+                f"{contact} message={message.id}"
+            )
+
+            mark_processed(source_id, message.id)
+            save_processed()
+            return
+
+    # 普通文字消息
+    if not message.photo:
+        if not text:
+            mark_processed(source_id, message.id)
+            save_processed()
+            return
+
+        success = await bot_send_text(
+            bot_instance,
+            text,
+        )
+
+        if success:
+            mark_processed(source_id, message.id)
+            save_processed()
+
+        return
+
+    # 图片消息
+    image_bytes = await download_image(client, message)
+
+    if not image_bytes:
+        return
+
+    # 二维码过滤
+    if detect_qr_code(image_bytes):
+        print(
+            f"   ❌ SKIP IMAGE QR "
+            f"message={message.id}"
+        )
+
+        mark_processed(source_id, message.id)
+        save_processed()
+        return
+
+    # OCR 过滤：联系方式及推广关键词
+    contact = detect_image_contact(image_bytes)
+
+    if contact:
+        print(
+            f"   ❌ SKIP IMAGE: OCR CONTENT DETECTED "
+            f"{contact} message={message.id}"
+        )
+
+        mark_processed(source_id, message.id)
+        save_processed()
+        return
+
+    try:
+        processed_image = add_watermark(image_bytes)
+
+    except Exception as exc:
+        print(f"   ❌ 图片处理失败: {exc}")
+        return
+
+    success = await bot_send_photo(
+        bot_instance,
+        processed_image,
+        text or None,
+    )
+
+    if success:
+        mark_processed(source_id, message.id)
+        save_processed()
+
+
+# ============================================================
+# 10. 处理相册
+# ============================================================
+
+async def process_album(client, source_entity, album_messages):
+    source_id = source_entity.id
+
+    album_messages.sort(
+        key=lambda message: (message.date, message.id)
+    )
+
+    print(f"\n📚 ALBUM MESSAGES={len(album_messages)}")
+
+    send_items = []
+    rejected_ids = []
+    pending_ids = []
+
+    for message in album_messages:
+        if is_processed(source_id, message.id):
+            print(
+                f"   ⏭️ SKIP PROCESSED "
+                f"message={message.id}"
+            )
+            continue
+
+        caption = (message.message or "").strip()
+
+        if caption:
+            contact = detect_text_contact(caption)
+
+            if contact:
+                print(
+                    f"   ❌ SKIP ALBUM IMAGE CAPTION "
+                    f"{contact} message={message.id}"
+                )
+
+                rejected_ids.append(message.id)
+                continue
+
+        if not message.photo:
+            rejected_ids.append(message.id)
+            continue
+
+        image_bytes = await download_image(
+            client,
+            message,
+        )
+
+        if not image_bytes:
+            print(
+                f"   ⚠️ 图片下载失败，暂不标记 "
+                f"message={message.id}"
+            )
+            continue
+
+        if detect_qr_code(image_bytes):
+            print(
+                f"   ❌ SKIP ALBUM IMAGE QR "
+                f"message={message.id}"
+            )
+
+            rejected_ids.append(message.id)
+            continue
+
+        contact = detect_image_contact(image_bytes)
+
+        if contact:
+            print(
+                f"   ❌ SKIP ALBUM IMAGE OCR "
+                f"{contact} message={message.id}"
+            )
+
+            rejected_ids.append(message.id)
+            continue
+
+        try:
+            watermarked = add_watermark(image_bytes)
+
+        except Exception as exc:
+            print(
+                f"   ❌ 图片处理失败 "
+                f"message={message.id}: {exc}"
+            )
+            continue
+
+        send_items.append(
+            {
+                "image_bytes": watermarked,
+                "caption": caption or None,
+                "message_id": message.id,
+            }
+        )
+
+        pending_ids.append(message.id)
+
+    if not send_items:
+        for message_id in rejected_ids:
+            mark_processed(source_id, message_id)
+
+        save_processed()
+
+        print("   ℹ️ 相册没有可发布图片")
+        return
+
+    print(f"   📦 SEND ALBUM ({len(send_items)} images)")
+
+    success = await bot_send_album(send_items)
+
+    if success:
+        for message_id in pending_ids + rejected_ids:
+            mark_processed(source_id, message_id)
+
+        save_processed()
+
+        print("   ✅ ALBUM PUBLISH SUCCESS")
+
+    else:
+        for message_id in rejected_ids:
+            mark_processed(source_id, message_id)
+
+        save_processed()
+
+        print("   ❌ ALBUM PUBLISH FAILED")
+        print("   ⚠️ 有效图片不会写入 processed.json")
+      # ============================================================
+# 11. 获取北京时间当天消息
+# ============================================================
+
+async def collect_today_messages(client, source_entity, source_name):
+    now = datetime.now(BEIJING_TZ)
+
+    today_start = now.replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+
+    today_end = today_start + timedelta(days=1)
+
+    messages = []
+    scanned = 0
+
+    print(f"\n🔎 SCANNING SOURCE: {source_name}")
+    print(f"   BEIJING DATE: {now:%Y-%m-%d}")
+    print(f"   SCAN LIMIT: {SCAN_LIMIT or 'ALL TODAY'}")
+
+    limit = SCAN_LIMIT if SCAN_LIMIT > 0 else None
+
+    async for message in client.iter_messages(
+        source_entity,
+        limit=limit,
+    ):
+        if not message.date:
+            continue
+
+        message_time = message.date.astimezone(BEIJING_TZ)
+
+        if message_time < today_start:
+            break
+
+        if message_time >= today_end:
+            continue
+
+        scanned += 1
+
+        if not message.photo and not (message.message or "").strip():
+            continue
+
+        messages.append(message)
+
+    messages.sort(
+        key=lambda message: (message.date, message.id)
+    )
+
+    print(f"   📥 TODAY MESSAGES: {len(messages)}")
+    print(f"   🔍 SCANNED: {scanned}")
+
+    return messages
+
+
+# ============================================================
+# 12. 解析目标频道
+# ============================================================
+
+async def resolve_target(client):
+    target_entity = await client.get_entity(TARGET_CHANNEL)
+
+    print("\n🎯 TARGET ENTITY")
+    print(f"   TITLE: {getattr(target_entity, 'title', '')}")
+    print(f"   ID: {target_entity.id}")
+    print(
+        f"   USERNAME: "
+        f"{getattr(target_entity, 'username', None)}"
+    )
+
+    username = getattr(target_entity, "username", None)
+
+    if username:
+        return target_entity, f"@{username}"
+
+    peer_id = utils.get_peer_id(target_entity)
+
+    return target_entity, peer_id
+
+
+# ============================================================
+# 13. 检查 Bot 目标频道
+# ============================================================
+
+async def diagnose_bot_target(bot_instance):
+    global BOT_TARGET_CHANNEL
+
+    print("\n🤖 BOT TARGET DIAGNOSTIC")
+
+    me = await bot_instance.get_me()
+
+    print("   ✅ BOT TOKEN VALID")
+    print(f"   BOT ID: {me.id}")
+    print(f"   BOT USERNAME: @{me.username}")
+    print(f"   BOT TARGET: {BOT_TARGET_CHANNEL}")
+
+    chat = await bot_instance.get_chat(
+        chat_id=BOT_TARGET_CHANNEL
+    )
+
+    print("   ✅ BOT CAN ACCESS TARGET")
+    print(f"   CHAT ID: {chat.id}")
+    print(f"   CHAT TYPE: {chat.type}")
+    print(f"   CHAT TITLE: {chat.title}")
+
+    return True
+
+
+# ============================================================
+# 14. 实时监听逻辑
+# ============================================================
+
+# 串行处理事件，降低并发转发和 processed.json 写入冲突的风险。
+PROCESS_LOCK = asyncio.Lock()
+
+live_client = None
+
+
+async def handle_live_single(event, source_entity):
+    message = event.message
+
+    # 相册由 events.Album 统一处理，避免相册被拆成单张图片转发。
+    if getattr(message, "grouped_id", None):
+        return
+
+    async with PROCESS_LOCK:
+        try:
+            await process_single_message(
+                client=live_client,
+                bot_instance=bot,
+                source_entity=source_entity,
+                message=message,
+            )
+
+        except Exception as exc:
+            logging.exception(
+                "实时单条消息处理失败: %s",
+                exc,
+            )
+
+
+async def handle_live_album(event, source_entity):
+    messages = list(
+        getattr(event, "messages", []) or []
+    )
+
+    if not messages:
+        return
+
+    async with PROCESS_LOCK:
+        try:
+            await process_album(
+                client=live_client,
+                source_entity=source_entity,
+                album_messages=messages,
+            )
+
+        except Exception as exc:
+            logging.exception(
+                "实时相册处理失败: %s",
+                exc,
+            )
+
+
+# ============================================================
+# 15. 主程序
+# ============================================================
+
+async def main():
+    global bot, BOT_TARGET_CHANNEL, live_client
+
+    print("=" * 65)
+    print("Telegram Channel Forwarder - REAL-TIME MODE")
+    print("=" * 65)
+
+    print(f"SOURCE CHANNELS: {SOURCE_CHANNELS}")
+    print(f"TARGET CHANNEL: {TARGET_CHANNEL}")
+
+    print(
+        "BEIJING TIME:",
+        datetime.now(BEIJING_TZ).isoformat(),
+    )
+
+    if not SOURCE_CHANNELS:
+        raise RuntimeError("SOURCE_CHANNELS 未配置")
+
+    live_client = TelegramClient(
+        StringSession(TELEGRAM_SESSION),
+        API_ID,
+        API_HASH,
+    )
+
+    print("\n🔌 正在连接 Telegram 用户账号...")
+
+    await live_client.connect()
+
+    if not await live_client.is_user_authorized():
+        await live_client.disconnect()
+
+        raise RuntimeError(
+            "Telegram Session 无效或已过期，请重新生成 TELEGRAM_SESSION"
+        )
+
+    print("✅ Telegram 用户账号已连接")
+
+    bot = Bot(token=BOT_TOKEN)
+
+    await bot.initialize()
+
+    try:
+        # 解析目标频道，取得 Bot API 使用的目标频道 ID/用户名。
+        _, BOT_TARGET_CHANNEL = await resolve_target(
+            live_client
+        )
+
+        await diagnose_bot_target(bot)
+
+        registered = 0
+
+        for source_name in SOURCE_CHANNELS:
+            try:
+                source_entity = await live_client.get_entity(
+                    source_name
+                )
+
+                print(
+                    f"📡 正在监听: "
+                    f"{getattr(source_entity, 'title', source_name)} "
+                    f"(ID={source_entity.id})"
+                )
+
+                async def single_callback(
+                    event,
+                    entity=source_entity,
+                ):
+                    await handle_live_single(
+                        event,
+                        entity,
+                    )
+
+                async def album_callback(
+                    event,
+                    entity=source_entity,
+                ):
+                    await handle_live_album(
+                        event,
+                        entity,
+                    )
+
+                live_client.add_event_handler(
+                    single_callback,
+                    events.NewMessage(chats=source_entity),
+                )
+
+                live_client.add_event_handler(
+                    album_callback,
+                    events.Album(chats=source_entity),
+                )
+
+                registered += 1
+
+            except Exception as exc:
+                logging.exception(
+                    "来源频道注册监听失败 %s: %s",
+                    source_name,
+                    exc,
+                )
+
+        if registered == 0:
+            raise RuntimeError(
+                "没有成功注册任何来源频道监听，请检查 SOURCE_CHANNELS 配置及账号权限"
+            )
+
+        print("=" * 65)
+
+        print(
+            f"🟢 实时监听已启动：成功监听 {registered} 个来源频道"
+        )
+
+        print(
+            "收到新文字、图片或相册后将自动过滤并转发。"
+        )
+
+        print(
+            "此模式只监听启动后的新消息，不会自动补发历史消息。"
+        )
+
+        print(
+            "必须部署在持续运行的后台服务；"
+            "GitHub Actions 定时任务不能 24/7 常驻。"
+        )
+
+        print("=" * 65)
+
+        await live_client.run_until_disconnected()
+
+    finally:
+        await bot.shutdown()
+        await live_client.disconnect()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
