@@ -1,9 +1,13 @@
-
 name: Telegram Channel Forwarder
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    # 每半小时采集一次（北京时间 UTC+8）
+    - cron: "0,30 * * * *"
+
+    # 每天北京时间晚上 21:35 额外采集一次
+    # GitHub Actions 使用 UTC，所以转换为 13:35
+    - cron: "35 13 * * *"
 
   workflow_dispatch:
 
