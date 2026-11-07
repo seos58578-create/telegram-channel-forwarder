@@ -5,8 +5,7 @@ on:
     # 每半小时采集一次（北京时间 UTC+8）
     - cron: "0,30 * * * *"
 
-    # 每天北京时间晚上 21:35 额外采集一次
-    # GitHub Actions 使用 UTC，所以转换为 13:35
+    # 每天北京时间 21:35 额外采集一次
     - cron: "35 13 * * *"
 
   workflow_dispatch:
@@ -25,7 +24,7 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      # 1. 获取 GitHub 仓库代码
+      # 1. 获取仓库代码
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -37,9 +36,36 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
+          cache: pip
 
-      # 3. 安装 Tesseract OCR 和语言包
+      # 3. 显示运行环境
+      - name: Check environment
+        run: |
+          echo "================================"
+          echo "UTC 时间：$(date -u)"
+          echo "北京时间：$(TZ=Asia/Shanghai date)"
+          echo "Python 版本："
+          python --version
+          echo "当前目录："
+          pwd
+          echo "仓库文件："
+          ls -la
+          echo "================================"
+
+      # 4. 检查必要文件
+      - name: Check required files
+        run: |
+          test -f main.py || {
+            echo "错误：找不到 main.py"
+            exit 1
+          }
+
+          test -f requirements.txt || {
+            echo "错误：找不到 requirements.txt"
+            exit 1
+          }
+
+      # 5. 安装 Tesseract OCR
       - name: Install Tesseract OCR
         run: |
           sudo apt-get update
@@ -49,13 +75,37 @@ jobs:
             tesseract-ocr-vie \
             tesseract-ocr-por
 
-      # 4. 安装 Python 依赖
+          tesseract --version
+          tesseract --list-langs
+
+      # 6. 安装 Python 依赖
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip check
 
-      # 5. 执行定时扫描程序
+      # 7. 检查 Telegram 环境变量
+      - name: Check Telegram configuration
+        env:
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+          TELEGRAM_SESSION: ${{ secrets.TELEGRAM_SESSION }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          SOURCE_CHANNELS: ${{ secrets.SOURCE_CHANNELS }}
+          TARGET_CHANNEL: ${{ secrets.TARGET_CHANNEL }}
+        run: |
+          for name in API_ID API_HASH TELEGRAM_SESSION BOT_TOKEN SOURCE_CHANNELS TARGET_CHANNEL
+          do
+            if [ -z "${!name}" ]; then
+              echo "错误：环境变量 $name 未配置或为空"
+              exit 1
+            else
+              echo "检查通过：$name"
+            fi
+          done
+
+      # 8. 执行 Telegram 采集转发程序
       - name: Run Telegram forwarder
         env:
           API_ID: ${{ secrets.API_ID }}
@@ -65,10 +115,26 @@ jobs:
           SOURCE_CHANNELS: ${{ secrets.SOURCE_CHANNELS }}
           TARGET_CHANNEL: ${{ secrets.TARGET_CHANNEL }}
           SCAN_LIMIT: "0"
+          TZ: Asia/Shanghai
+          PYTHONUNBUFFERED: "1"
         run: |
-          python main.py
+          echo "================================"
+          echo "开始执行 Telegram 采集程序"
+          echo "北京时间：$(date)"
+          echo "================================"
 
-      # 6. 保存 processed.json 去重记录
+          python -u main.py
+
+          EXIT_CODE=$?
+
+          echo "================================"
+          echo "采集程序退出代码：$EXIT_CODE"
+          echo "北京时间：$(date)"
+          echo "================================"
+
+          exit $EXIT_CODE
+
+      # 9. 保存去重记录
       - name: Save processed records
         if: always()
         run: |
@@ -81,9 +147,10 @@ jobs:
             if ! git diff --cached --quiet; then
               git commit -m "Update processed messages"
               git push origin HEAD:main
+              echo "processed.json 保存成功"
             else
-              echo "No processed records changed."
+              echo "没有新的去重记录需要保存"
             fi
           else
-            echo "processed.json does not exist."
+            echo "processed.json 不存在"
           fi
